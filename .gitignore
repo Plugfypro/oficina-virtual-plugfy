@@ -29,3 +29,8 @@ knowledge/n8n_autonomos_para_trabajadores*.csv
 knowledge/plantilla_conexiones_pendientes*.json
 config/catalogo-precios.json
 
+# Backups locales de workflows reales de n8n — contienen la clave real de
+# OpenAI hardcodeada (mismo patron que el workflow original en produccion),
+# nunca deben subirse al repo publico.
+knowledge/n8n-workflows-backup/
+
