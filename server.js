@@ -521,6 +521,52 @@ function buildWorkExecution(entry, department) {
   return execution;
 }
 
+// Fuentes de heartbeat que representan una accion real ya completada por una
+// automatizacion de IA (n8n) en una sola pasada — a diferencia de las
+// ejecuciones que crea la consola CEO (que son tareas humanas de varios dias
+// con pasos que alguien tiene que ir completando), estas se crean YA
+// terminadas, porque el trabajo real que describen ya se hizo de verdad en el
+// momento en que llega el heartbeat. No incluye 'n8n-real-sync' (ese refleja
+// estado continuo real, no una tarea puntual) ni 'mission' (no es automatizacion
+// real, es la mision fija de los 130 trabajadores simulados).
+const AUTOMATION_COMPLETION_SOURCES = new Set([
+  'n8n-gmb-content-ia',
+  'n8n-seo-auditoria-ia',
+  'n8n-auditoria-web-ia',
+  'n8n-reporte-diario-ia',
+  'n8n-gmail-clasificador-ia',
+  'n8n-alertas-ia',
+]);
+
+function buildCompletedAutomationExecution(agent, task) {
+  const department = inferDepartment(agent);
+  const template = TEAM_EXECUTION_TEMPLATES[department] || TEAM_EXECUTION_TEMPLATES.operaciones;
+  const execution = {
+    id: nextWorkExecutionId++,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    department,
+    status: 'hecho',
+    sourceInstructionId: null,
+    title: `${template.title} · ${department}`,
+    brief: task || '',
+    target: department,
+    author: 'Automatizacion IA',
+    steps: template.steps.map(([key, label]) => ({ key, label, status: 'hecho' })),
+    assigned: [{ agent: agent.agent, name: agent.name || agent.agent, status: 'hecho' }],
+    result: task || '',
+  };
+  workExecutions.push(execution);
+  if (workExecutions.length > 300) workExecutions.shift();
+  pushEvent(`work_execution:${department}`, {
+    type: 'work_execution',
+    state: execution.status,
+    task: truncate(`Trabajo real completado por ${agent.agent} #${execution.id}: ${task || template.title}`, 140),
+  });
+  saveState();
+  return execution;
+}
+
 function maybeCreateWorkExecutions(entry) {
   const scope = String(entry.scope || '').toLowerCase();
   const target = String(entry.target || '').toLowerCase();
@@ -2326,6 +2372,10 @@ const server = http.createServer(async (req, res) => {
         state: agent.state,
         task: truncate(agent.task || ''),
       });
+      const source = payload.metadata && payload.metadata.source;
+      if (source && AUTOMATION_COMPLETION_SOURCES.has(source) && payload.task) {
+        buildCompletedAutomationExecution(agent, payload.task);
+      }
       json(res, 200, { ok: true, agent: { ...agent, lastSeen: undefined } });
     } catch {
       json(res, 400, { error: 'Invalid JSON body' });
