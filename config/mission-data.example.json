@@ -1,0 +1,186 @@
+{
+  "reglaMadre": [
+    "No improvisar",
+    "No publicar nada con errores",
+    "No gastar recursos sin sentido",
+    "Dejar todo más claro, más vendible y más automatizado",
+    "Trabajar siempre para las 4 marcas principales: Virtual Marketing Spain, Plugfy.pro, Gramflow, TPV Plugfy"
+  ],
+  "ritmoDiario": [
+    {
+      "hora": "09:00",
+      "accion": "Revisar estado, prioridades y bloqueos"
+    },
+    {
+      "hora": "11:00",
+      "accion": "Ejecutar tarea principal del día"
+    },
+    {
+      "hora": "14:00",
+      "accion": "Dejar evidencia o avance claro"
+    },
+    {
+      "hora": "17:00",
+      "accion": "Revisar si hay algo atascado"
+    },
+    {
+      "hora": "20:00",
+      "accion": "Cierre corto o actualización de estado"
+    }
+  ],
+  "ritmoSemanal": {
+    "lunes": "Prioridades",
+    "martes": "Producción",
+    "miércoles": "Optimización",
+    "jueves": "Revisión comercial / SEO / conversión",
+    "viernes": "Resumen, aprendizajes y siguiente plan"
+  },
+  "herramientasPorDepartamento": {
+    "direccion": "Panel CEO, Reportes",
+    "operaciones": "n8n, Google Sheets, Panel oficina",
+    "community": "n8n, Meta Business Suite, YouTube Studio, Biblioteca de hooks",
+    "copy": "Editor de contenido, checklist de revisión",
+    "comerciales": "WhatsApp, Email, Google Sheets, Leads scraper",
+    "auditorias": "Google Calendar, Google Sheets, Email",
+    "seo": "Search Console, herramientas SEO/GEO/AEO",
+    "gmb": "Google Business Profile",
+    "web": "WordPress, Hostinger, editor de landings",
+    "automatizacion": "n8n, OpenAI, Webhooks",
+    "ads": "Meta Ads Manager, Google Ads",
+    "research": "Redes sociales, herramientas de análisis de competencia"
+  },
+  "agentes": {
+    "director_general": {
+      "dept": "direccion",
+      "mission": "Dirigiendo prioridades, equipos y foco comercial de la agencia",
+      "diaria": "Revisar metricas, prioridades, bloqueos y foco del equipo.",
+      "semanal": "Definir prioridades semanales y revisar resultados por marca.",
+      "kpi": "claridad de foco y bloqueos resueltos",
+      "marcas": [
+        "Mi Empresa"
+      ],
+      "acceso": [
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo"
+      ]
+    },
+    "project_manager": {
+      "dept": "direccion",
+      "mission": "Controlando tareas activas, prioridades, bloqueos y entregas entre departamentos",
+      "diaria": "Revisar metricas, prioridades, bloqueos y foco del equipo.",
+      "semanal": "Definir prioridades semanales y revisar resultados por marca.",
+      "kpi": "claridad de foco y bloqueos resueltos",
+      "marcas": [
+        "Mi Empresa"
+      ],
+      "acceso": [
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo"
+      ]
+    },
+    "cm_vms": {
+      "dept": "community",
+      "mission": "Coordinando calendario, publicaciones y prioridades de contenido, vigilando n8n, automatizaciones y estado de publicación web/redes",
+      "diaria": "Preparar, revisar o adaptar contenido del dia y vigilar automatizaciones de publicacion.",
+      "semanal": "Dejar lote semanal de piezas, hooks o calendario cerrado.",
+      "kpi": "publicaciones correctas, alcance y guardados",
+      "marcas": [
+        "Mi Empresa"
+      ],
+      "acceso": [
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo"
+      ]
+    },
+    "social_instagram_main": {
+      "dept": "community",
+      "mission": "Preparando reels y publicaciones comerciales para la cuenta principal y revisando que n8n esté publicando sin errores",
+      "diaria": "Preparar, revisar o adaptar contenido del dia y vigilar automatizaciones de publicacion.",
+      "semanal": "Dejar lote semanal de piezas, hooks o calendario cerrado.",
+      "kpi": "publicaciones correctas, alcance y guardados",
+      "marcas": [
+        "Mi Empresa"
+      ],
+      "acceso": [
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo"
+      ]
+    },
+    "ventas_01": {
+      "dept": "comerciales",
+      "mission": "Gestionando seguimiento comercial y oportunidades de automatización",
+      "diaria": "Mover leads, seguimientos, auditorias y oportunidades activas.",
+      "semanal": "Limpiar pipeline y empujar reuniones, propuestas o cierres.",
+      "kpi": "respuestas, auditorias, reuniones y cierres",
+      "marcas": [
+        "Mi Empresa"
+      ],
+      "acceso": [
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo"
+      ]
+    },
+    "setter_leads": {
+      "dept": "comerciales",
+      "mission": "Clasificando leads entrantes y preparando primeros contactos comerciales",
+      "diaria": "Mover leads, seguimientos, auditorias y oportunidades activas.",
+      "semanal": "Limpiar pipeline y empujar reuniones, propuestas o cierres.",
+      "kpi": "respuestas, auditorias, reuniones y cierres",
+      "marcas": [
+        "Mi Empresa"
+      ],
+      "acceso": [
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo"
+      ]
+    },
+    "seo_lead": {
+      "dept": "seo",
+      "mission": "Analizando mejoras SEO, GEO y AEO en webs y servicios clave",
+      "diaria": "Detectar una mejora concreta de SEO, GEO, AEO o Google Business.",
+      "semanal": "Actualizar backlog y priorizar mejoras por marca o ficha.",
+      "kpi": "oportunidades accionadas y visibilidad",
+      "marcas": [
+        "Mi Empresa"
+      ],
+      "acceso": [
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo"
+      ]
+    },
+    "automatizacion_n8n": {
+      "dept": "automatizacion",
+      "mission": "Manteniendo flujos de automatización, contenido y reporting",
+      "diaria": "Vigilar flujos, bots, prompts, tracking o campanas segun su rol.",
+      "semanal": "Optimizar automatizaciones, anuncios o medicion sin sobrecoste.",
+      "kpi": "estabilidad, CPL, conversion o calidad del flujo",
+      "marcas": [
+        "Mi Empresa"
+      ],
+      "acceso": [
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo",
+        "Plataforma de ejemplo"
+      ]
+    }
+  }
+}

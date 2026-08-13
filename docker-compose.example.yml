@@ -1,0 +1,39 @@
+services:
+  miniverse-office:
+    build: .
+    container_name: miniverse-office
+    restart: unless-stopped
+    environment:
+      PORT: ${PORT:-4321}
+      OFFLINE_TIMEOUT_MS: ${OFFLINE_TIMEOUT_MS:-900000}
+      CEO_PANEL_TOKEN: ${CEO_PANEL_TOKEN}
+      DATA_FILE: ${DATA_FILE:-/app/data/state.json}
+      PUBLIC_OFFICE_URL: ${PUBLIC_OFFICE_URL:-}
+    ports:
+      - "4321:4321"
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+    mem_limit: 512m
+    cpus: 0.50
+
+# Para exponerlo con tu propio dominio y HTTPS (Traefik, Nginx, Caddy...),
+# añade tu propia configuracion de reverse proxy. Ejemplo de labels para
+# Traefik, si ya usas un stack con Traefik en la misma red:
+#
+#   labels:
+#     - traefik.enable=true
+#     - traefik.docker.network=tu_red_traefik
+#     - traefik.http.routers.miniverse-office.rule=Host(`tu-dominio.com`)
+#     - traefik.http.routers.miniverse-office.tls=true
+#     - traefik.http.routers.miniverse-office.entrypoints=web,websecure
+#     - traefik.http.routers.miniverse-office.tls.certresolver=tu_certresolver
+#     - traefik.http.services.miniverse-office.loadbalancer.server.port=4321
+#   networks:
+#     - default
+#     - tu_red_traefik
+#
+# networks:
+#   tu_red_traefik:
+#     external: true
+#     name: tu_red_traefik

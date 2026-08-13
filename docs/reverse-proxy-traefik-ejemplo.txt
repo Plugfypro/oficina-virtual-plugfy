@@ -1,0 +1,26 @@
+Ejemplo conceptual de publicación con Traefik en el mismo VPS de n8n:
+
+Subdominio recomendado:
+
+- hq.virtualmarketingspain.com
+o
+- office.virtualmarketingspain.com
+
+Puntos clave:
+
+1. Contenedor aparte:
+   - nombre: miniverse-office
+   - puerto interno: 4321
+
+2. Límites:
+   - memoria: 512 MB
+   - cpu: 0.50
+
+3. Red:
+   - misma red docker que Traefik
+   - no tocar el contenedor de n8n
+
+4. Ruta final:
+   - https://hq.virtualmarketingspain.com/office
+
+Luego podemos hacer que la raíz `/` redirija a `/office` si quieres.

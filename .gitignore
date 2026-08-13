@@ -1,0 +1,25 @@
+.env
+.env.local
+docker-compose.yml
+data/
+*.local
+node_modules/
+state.json*
+*.backup
+*.backup-*
+graphify-out/
+
+# Datos reales de la empresa — el repo publico solo trae el ejemplo generico
+# (config/mission-data.example.json). Cada instalacion pone su propio
+# config/mission-data.json local, nunca se sube.
+config/mission-data.json
+
+# Documentos de trabajo internos con datos reales de la empresa (no son
+# parte del "motor" reutilizable ni de la documentacion publica)
+knowledge/asignacion_accesos_trabajadores*.csv
+knowledge/plan_maestro_trabajadores*
+knowledge/instrucciones_para_claude_plan_trabajadores*.md
+knowledge/github_plan_ejecucion_claude*.csv
+knowledge/hooks-social-vms.md
+knowledge/manual-operativo-oficina.md
+
