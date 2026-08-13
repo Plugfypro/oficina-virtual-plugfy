@@ -70,6 +70,7 @@ repo — ver [`docs/personalizacion.md`](docs/personalizacion.md)).
 - [Seguridad](docs/seguridad.md)
 - [Personalización](docs/personalizacion.md)
 - [Backup y restauración](docs/backup-restore.md)
+- [Escalado a más de un cliente/negocio](docs/escalado.md)
 
 ## Ejemplo de heartbeat (reportar estado real de un trabajador)
 

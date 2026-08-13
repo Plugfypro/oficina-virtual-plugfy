@@ -1,0 +1,13 @@
+paso,accion,comando_o_detalle,verificacion
+1,Clonar el repositorio,git clone <url> && cd miniverse-office,El directorio existe con server.js dentro
+2,Instalar Docker y Docker Compose,Segun tu sistema operativo,docker --version && docker compose version
+3,Crear archivo de entorno,cp .env.example .env,Editar CEO_PANEL_TOKEN con un valor real y largo
+4,Crear docker-compose real,cp docker-compose.example.yml docker-compose.yml,Ajustar si usas reverse proxy propio
+5,Configurar el equipo real (opcional),Crear config/mission-data.json,Si no se crea arranca con el ejemplo generico
+6,Levantar el servicio,docker compose up -d --build,docker compose ps muestra el contenedor Up
+7,Verificar API,curl http://localhost:4321/api/info,Responde con miniverse:true y el numero de agentes
+8,Abrir la oficina,http://localhost:4321/office,Se ve la oficina con los departamentos
+9,Guardar el token del CEO,En la propia interfaz /office o gestor de contraseñas,Consola de ordenes funciona tras guardarlo
+10,Configurar dominio/HTTPS si se publica,Reverse proxy (Traefik/Nginx/Caddy) apuntando al puerto,El dominio responde con HTTPS valido
+11,Programar backup periodico,Cron o Programador de tareas sobre data/state.json,Existe al menos un backup tras 24h
+12,(Opcional) Conectar datos reales,Configurar y desplegar office-reality-sync,Los agentes conectados muestran estado real
