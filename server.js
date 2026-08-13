@@ -218,7 +218,7 @@ function heartbeat(payload) {
 }
 
 function publicAgents() {
-  return Array.from(agents.values()).map(({ lastSeen, ...rest }) => sanitizeDeep(rest));
+  return Array.from(agents.values()).map((agent) => sanitizeDeep(agent));
 }
 
 function pushEvent(agentId, action) {
@@ -894,6 +894,10 @@ h1{margin:0 0 14px;font-size:clamp(32px,4vw,56px);line-height:.95}
 .social-badge.en_proceso{background:rgba(87,199,255,.12);color:#57c7ff}
 .social-badge.hecho{background:rgba(35,209,139,.12);color:#23d18b}
 .social-steps{display:grid;gap:8px}
+.steps-progress{display:flex;align-items:center;gap:10px;margin:8px 0}
+.steps-progress-bar{flex:1;height:6px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden}
+.steps-progress-bar span{display:block;height:100%;background:linear-gradient(90deg,#d4af37,#f0d97a);border-radius:999px;transition:width .3s ease}
+.steps-progress b{font-size:11px;color:#d4af37;white-space:nowrap}
 .social-step{display:flex;justify-content:space-between;gap:10px;padding:10px 12px;border-radius:14px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.05);font-size:12px}
 .social-step span{color:#cfd0d8}
 .social-step b{font-size:11px;text-transform:uppercase;letter-spacing:.05em}
@@ -1196,7 +1200,7 @@ function socialExecutionRow(item){
   const updated=item?.updatedAt?new Date(item.updatedAt).toLocaleString('es-ES'):'sin fecha';
   const steps=(item.steps||[]).map(step=>'<div class="social-step"><span>'+String(step.label||step.key||'Paso')+'</span><b class="'+String(step.status||'pendiente')+'">'+String(step.status||'pendiente').replaceAll('_',' ')+'</b></div>').join('');
   const assigned=(item.assigned||[]).map(worker=>'<span class="social-worker '+String(worker.status||'pendiente')+'">'+String(worker.name||worker.agent||'worker')+' · '+String(worker.status||'pendiente').replaceAll('_',' ')+'</span>').join('');
-  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+String(item.id||'0')+' · '+String(item.title||'Sin título')+'</div><div class="social-exec-meta">Por '+String(item.author||'CEO')+' · Actualizado: '+updated+'</div></div><span class="social-badge '+badgeClass+'">'+badgeClass.replaceAll('_',' ')+'</span></div><div class="social-exec-meta">'+String(item.brief||'Sin brief')+'</div><div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
+  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+String(item.id||'0')+' · '+String(item.title||'Sin título')+'</div><div class="social-exec-meta">Por '+String(item.author||'CEO')+' · Actualizado: '+updated+'</div></div><span class="social-badge '+badgeClass+'">'+badgeClass.replaceAll('_',' ')+'</span></div><div class="social-exec-meta">'+String(item.brief||'Sin brief')+'</div>'+stepsBadge(item.steps)+'<div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
 }
 function workExecutionRow(item){
   const badgeClass=String(item.status||'pendiente');
@@ -1204,7 +1208,7 @@ function workExecutionRow(item){
   const steps=(item.steps||[]).map(step=>'<div class="social-step"><span>'+String(step.label||step.key||'Paso')+'</span><b class="'+String(step.status||'pendiente')+'">'+String(step.status||'pendiente').replaceAll('_',' ')+'</b></div>').join('');
   const assigned=(item.assigned||[]).map(worker=>'<span class="social-worker '+String(worker.status||'pendiente')+'">'+String(worker.name||worker.agent||'worker')+' · '+String(worker.status||'pendiente').replaceAll('_',' ')+'</span>').join('');
   const resources=(item.resources||[]).map(resource=>'<span class="resource-chip">'+String(resource)+'</span>').join('');
-  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+String(item.id||'0')+' · '+String(item.title||'Sin título')+'</div><div class="social-exec-meta">Grupo: '+String(item.department||'general')+' · Por '+String(item.author||'CEO')+' · Actualizado: '+updated+'</div></div><span class="social-badge '+badgeClass+'">'+badgeClass.replaceAll('_',' ')+'</span></div><div class="social-exec-meta">'+String(item.brief||'Sin brief')+'</div><div class="resource-list">'+resources+'</div><div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
+  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+String(item.id||'0')+' · '+String(item.title||'Sin título')+'</div><div class="social-exec-meta">Grupo: '+String(item.department||'general')+' · Por '+String(item.author||'CEO')+' · Actualizado: '+updated+'</div></div><span class="social-badge '+badgeClass+'">'+badgeClass.replaceAll('_',' ')+'</span></div><div class="social-exec-meta">'+String(item.brief||'Sin brief')+'</div><div class="resource-list">'+resources+'</div>'+stepsBadge(item.steps)+'<div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
 }
 function euro(value){
   const num=Number(value||0);
@@ -1213,6 +1217,27 @@ function euro(value){
 function percent(part,total){
   if(!total || total<=0) return 0;
   return Math.max(0,Math.min(100,Math.round((part/total)*100)));
+}
+function pctSteps(steps){
+  const list=steps||[];
+  if(!list.length) return 0;
+  const hechos=list.filter(s=>String(s.status)==='hecho').length;
+  return percent(hechos,list.length);
+}
+function stepsBadge(steps){
+  const pct=pctSteps(steps);
+  return '<div class="steps-progress"><div class="steps-progress-bar"><span style="width:'+pct+'%"></span></div><b>'+pct+'% completado</b></div>';
+}
+function timeAgo(ms){
+  if(!ms) return 'sin datos';
+  const diff=Math.max(0,Date.now()-Number(ms));
+  const min=Math.floor(diff/60000);
+  if(min<1) return 'hace segundos';
+  if(min<60) return 'hace '+min+'m';
+  const h=Math.floor(min/60);
+  if(h<24) return 'hace '+h+'h';
+  const d=Math.floor(h/24);
+  return 'hace '+d+'d';
 }
 function statusText(value){
   if(value==='error') return '<span class="status-error">Error</span>';
@@ -1326,7 +1351,7 @@ function renderOffice(agents){
         const agentName=agent.name||agent.agent||'Agente';
         const task=agent.task?String(agent.task):'Sin tarea visible en este momento.';
         const state=agent.state||'idle';
-        return '<article class="desk" data-agent-card="'+String(agent.agent||'')+'"><div class="desk-top"><div class="avatar">'+initials(agentName)+'</div><div><div class="desk-name">'+agentName+'</div><div class="desk-role">'+inferDepartment(agent)+'</div></div></div><div class="desk-status"><span class="dot '+state+'"></span>'+stateLabel(state)+'</div><div class="task">'+task+'</div></article>';
+        return '<article class="desk" data-agent-card="'+String(agent.agent||'')+'"><div class="desk-top"><div class="avatar">'+initials(agentName)+'</div><div><div class="desk-name">'+agentName+'</div><div class="desk-role">'+inferDepartment(agent)+'</div></div></div><div class="desk-status"><span class="dot '+state+'"></span>'+stateLabel(state)+' · '+timeAgo(agent.lastSeen)+'</div><div class="task">'+task+'</div></article>';
       }).join(''):'<div class="desk-empty">Zona preparada para nuevos agentes</div>')+'</div></div></details></section>';
   }).join('');
 }
@@ -1377,7 +1402,7 @@ function renderReplyCard(execution,kind){
   const leadName=lead?(lead.name||lead.agent):(execution.department||'Equipo');
   const stepsHtml=(execution.steps||[]).map(step=>'<div class="reply-step"><span>'+String(step.label||step.key||'Paso')+'</span><b class="'+String(step.status||'pendiente')+'">'+String(step.status||'pendiente').replaceAll('_',' ')+'</b></div>').join('');
   const otros=workers.slice(1).map(w=>w.name||w.agent).join(', ');
-  return '<div class="reply-card"><div class="reply-card-head"><div class="reply-card-avatar">'+initials(leadName)+'</div><div><div class="reply-card-name">'+leadName+' ha recibido la orden</div><div class="reply-card-sub">'+(execution.department?('Equipo: '+execution.department+(otros?' · con apoyo de '+otros:''))+' · '+kind:kind)+'</div></div></div><div class="reply-steps">'+stepsHtml+'</div></div>';
+  return '<div class="reply-card"><div class="reply-card-head"><div class="reply-card-avatar">'+initials(leadName)+'</div><div><div class="reply-card-name">'+leadName+' ha recibido la orden</div><div class="reply-card-sub">'+(execution.department?('Equipo: '+execution.department+(otros?' · con apoyo de '+otros:''))+' · '+kind:kind)+'</div></div></div>'+stepsBadge(execution.steps)+'<div class="reply-steps">'+stepsHtml+'</div></div>';
 }
 function renderCommandReply(data){
   const box=document.getElementById('command-reply');
@@ -1735,6 +1760,10 @@ p,span{color:#b8b8c3;line-height:1.6}
 .social-badge.en_proceso{background:rgba(87,199,255,.12);color:#57c7ff}
 .social-badge.hecho{background:rgba(35,209,139,.12);color:#23d18b}
 .social-steps{display:grid;gap:8px}
+.steps-progress{display:flex;align-items:center;gap:10px;margin:8px 0}
+.steps-progress-bar{flex:1;height:6px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden}
+.steps-progress-bar span{display:block;height:100%;background:linear-gradient(90deg,#d4af37,#f0d97a);border-radius:999px;transition:width .3s ease}
+.steps-progress b{font-size:11px;color:#d4af37;white-space:nowrap}
 .social-step{display:flex;justify-content:space-between;gap:10px;padding:10px 12px;border-radius:14px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.05);font-size:12px}
 .social-step b.pendiente{color:#f0b94f}.social-step b.en_proceso{color:#57c7ff}.social-step b.hecho{color:#23d18b}
 .social-assigned,.resource-list{display:flex;flex-wrap:wrap;gap:8px}
@@ -1815,12 +1844,37 @@ p,span{color:#b8b8c3;line-height:1.6}
   </section>
 </div>
 <script>
+function percent(part,total){
+  if(!total || total<=0) return 0;
+  return Math.max(0,Math.min(100,Math.round((part/total)*100)));
+}
+function pctSteps(steps){
+  const list=steps||[];
+  if(!list.length) return 0;
+  const hechos=list.filter(s=>String(s.status)==='hecho').length;
+  return percent(hechos,list.length);
+}
+function stepsBadge(steps){
+  const pct=pctSteps(steps);
+  return '<div class="steps-progress"><div class="steps-progress-bar"><span style="width:'+pct+'%"></span></div><b>'+pct+'% completado</b></div>';
+}
+function timeAgo(ms){
+  if(!ms) return 'sin datos';
+  const diff=Math.max(0,Date.now()-Number(ms));
+  const min=Math.floor(diff/60000);
+  if(min<1) return 'hace segundos';
+  if(min<60) return 'hace '+min+'m';
+  const h=Math.floor(min/60);
+  if(h<24) return 'hace '+h+'h';
+  const d=Math.floor(h/24);
+  return 'hace '+d+'d';
+}
 function socialExecutionRow(item){
   const badgeClass=String(item.status||'pendiente');
   const updated=item?.updatedAt?new Date(item.updatedAt).toLocaleString('es-ES'):'sin fecha';
   const steps=(item.steps||[]).map(step=>'<div class="social-step"><span>'+String(step.label||step.key||'Paso')+'</span><b class="'+String(step.status||'pendiente')+'">'+String(step.status||'pendiente').replaceAll('_',' ')+'</b></div>').join('');
   const assigned=(item.assigned||[]).map(worker=>'<span class="social-worker '+String(worker.status||'pendiente')+'">'+String(worker.name||worker.agent||'worker')+' · '+String(worker.status||'pendiente').replaceAll('_',' ')+'</span>').join('');
-  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+String(item.id||'0')+' · '+String(item.title||'Sin título')+'</div><div class="social-exec-meta">Por '+String(item.author||'CEO')+' · Actualizado: '+updated+'</div></div><span class="social-badge '+badgeClass+'">'+badgeClass.replaceAll('_',' ')+'</span></div><div class="social-exec-meta">'+String(item.brief||'Sin brief')+'</div><div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
+  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+String(item.id||'0')+' · '+String(item.title||'Sin título')+'</div><div class="social-exec-meta">Por '+String(item.author||'CEO')+' · Actualizado: '+updated+'</div></div><span class="social-badge '+badgeClass+'">'+badgeClass.replaceAll('_',' ')+'</span></div><div class="social-exec-meta">'+String(item.brief||'Sin brief')+'</div>'+stepsBadge(item.steps)+'<div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
 }
 function workExecutionRow(item){
   const badgeClass=String(item.status||'pendiente');
@@ -1828,7 +1882,7 @@ function workExecutionRow(item){
   const steps=(item.steps||[]).map(step=>'<div class="social-step"><span>'+String(step.label||step.key||'Paso')+'</span><b class="'+String(step.status||'pendiente')+'">'+String(step.status||'pendiente').replaceAll('_',' ')+'</b></div>').join('');
   const assigned=(item.assigned||[]).map(worker=>'<span class="social-worker '+String(worker.status||'pendiente')+'">'+String(worker.name||worker.agent||'worker')+' · '+String(worker.status||'pendiente').replaceAll('_',' ')+'</span>').join('');
   const resources=(item.resources||[]).map(resource=>'<span class="resource-chip">'+String(resource)+'</span>').join('');
-  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+String(item.id||'0')+' · '+String(item.title||'Sin título')+'</div><div class="social-exec-meta">Grupo: '+String(item.department||'general')+' · Por '+String(item.author||'CEO')+' · Actualizado: '+updated+'</div></div><span class="social-badge '+badgeClass+'">'+badgeClass.replaceAll('_',' ')+'</span></div><div class="social-exec-meta">'+String(item.brief||'Sin brief')+'</div><div class="resource-list">'+resources+'</div><div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
+  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+String(item.id||'0')+' · '+String(item.title||'Sin título')+'</div><div class="social-exec-meta">Grupo: '+String(item.department||'general')+' · Por '+String(item.author||'CEO')+' · Actualizado: '+updated+'</div></div><span class="social-badge '+badgeClass+'">'+badgeClass.replaceAll('_',' ')+'</span></div><div class="social-exec-meta">'+String(item.brief||'Sin brief')+'</div><div class="resource-list">'+resources+'</div>'+stepsBadge(item.steps)+'<div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
 }
 async function refreshSocialExecutions(){
   const box=document.getElementById('social-exec-list');
@@ -1950,8 +2004,9 @@ function renderManualHtml() {
   const seccionesHtml = deptOrder.map((dept) => {
     const workers = porDepartamento[dept];
     const filas = workers.map((w) => `
-      <tr>
+      <tr data-agent="${escapeHtml(w.id)}">
         <td class="w-name">${escapeHtml(w.id)}${w.prioridad ? `<span class="prio-badge prio-${escapeHtml(w.prioridad)}">${escapeHtml(w.prioridad)}</span>` : ''}${w.leaderEquivalente ? `<div class="reinforces">refuerza a ${escapeHtml(w.leaderEquivalente)}</div>` : ''}</td>
+        <td class="live-status" data-status-cell><span class="dot"></span>cargando…</td>
         <td>${escapeHtml(w.mission)}</td>
         <td>${escapeHtml(w.diaria)}</td>
         <td>${escapeHtml(w.semanal)}</td>
@@ -1966,7 +2021,7 @@ function renderManualHtml() {
       </summary>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Trabajador</th><th>Misión</th><th>Diario</th><th>Semanal</th><th>KPI</th><th>Marcas</th><th>Acceso real</th></tr></thead>
+          <thead><tr><th>Trabajador</th><th>Estado real</th><th>Misión</th><th>Diario</th><th>Semanal</th><th>KPI</th><th>Marcas</th><th>Acceso real</th></tr></thead>
           <tbody>${filas}</tbody>
         </table>
       </div>
@@ -2018,6 +2073,14 @@ td{padding:10px 14px;border-top:1px solid rgba(255,255,255,.05);vertical-align:t
 .prio-badge.prio-media{color:#f0b94f}
 .prio-badge.prio-refuerzo{color:#8794ff}
 .reinforces{margin-top:2px;font-size:9.5px;color:#6b6b76;font-style:italic;font-family:Inter,sans-serif}
+.live-status{white-space:nowrap;font-size:11.5px}
+.live-status .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:#55555f}
+.live-status .dot.working{background:#23d18b}
+.live-status .dot.thinking{background:#57c7ff}
+.live-status .dot.sleeping{background:#8794ff}
+.live-status .dot.offline{background:#55555f}
+.live-status .dot.waiting{background:#f0b94f}
+.live-status .ago{display:block;color:#6b6b76;font-size:10px;margin-top:2px}
 @media (max-width:780px){h1{font-size:28px}}
 </style>
 </head>
@@ -2041,6 +2104,40 @@ td{padding:10px 14px;border-top:1px solid rgba(255,255,255,.05);vertical-align:t
   </div>
   ${seccionesHtml}
 </div>
+<script>
+function timeAgoManual(ms){
+  if(!ms) return 'sin datos';
+  const diff=Math.max(0,Date.now()-Number(ms));
+  const min=Math.floor(diff/60000);
+  if(min<1) return 'hace segundos';
+  if(min<60) return 'hace '+min+'m';
+  const h=Math.floor(min/60);
+  if(h<24) return 'hace '+h+'h';
+  const d=Math.floor(h/24);
+  return 'hace '+d+'d';
+}
+const MANUAL_STATE_LABEL={working:'Trabajando',idle:'En espera',thinking:'Pensando',speaking:'Hablando',sleeping:'Pausado',error:'Con incidencia',offline:'Desconectado',collaborating:'Colaborando',waiting:'Esperando',listening:'Escuchando'};
+async function refreshManualEstado(){
+  try{
+    const res=await fetch('/api/agents');
+    const data=await res.json();
+    const porId={};
+    (data.agents||[]).forEach(a=>{ porId[a.agent]=a; });
+    document.querySelectorAll('tr[data-agent]').forEach(row=>{
+      const id=row.getAttribute('data-agent');
+      const agent=porId[id];
+      const cell=row.querySelector('[data-status-cell]');
+      if(!cell) return;
+      if(!agent){ cell.innerHTML='<span class="dot"></span>sin datos'; return; }
+      const state=agent.state||'idle';
+      const label=MANUAL_STATE_LABEL[state]||state;
+      cell.innerHTML='<span class="dot '+state+'"></span>'+label+'<span class="ago">'+timeAgoManual(agent.lastSeen)+'</span>';
+    });
+  }catch(e){}
+}
+refreshManualEstado();
+setInterval(refreshManualEstado,15000);
+</script>
 </body>
 </html>`;
 }

@@ -22,4 +22,10 @@ knowledge/instrucciones_para_claude_plan_trabajadores*.md
 knowledge/github_plan_ejecucion_claude*.csv
 knowledge/hooks-social-vms.md
 knowledge/manual-operativo-oficina.md
+knowledge/checklist_conexion_real*.md
+knowledge/estado_operativo_departamentos*.csv
+knowledge/inventario_workflows_locales*.csv
+knowledge/n8n_autonomos_para_trabajadores*.csv
+knowledge/plantilla_conexiones_pendientes*.json
+config/catalogo-precios.json
 
