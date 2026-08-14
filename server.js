@@ -1,12 +1,160 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
 
 const port = Number(process.env.PORT || 4321);
 const offlineTimeout = Number(process.env.OFFLINE_TIMEOUT_MS || 30000);
 const ceoPanelToken = String(process.env.CEO_PANEL_TOKEN || '');
+const heartbeatToken = String(process.env.HEARTBEAT_TOKEN || '');
+const SESSION_COOKIE = 'miniverse_session';
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const sessions = new Map();
+
+function verifyPassword(password, storedHash) {
+  const [salt, hash] = storedHash.split(':');
+  if (!salt || !hash) return false;
+  const candidate = crypto.scryptSync(password, salt, 64);
+  const expected = Buffer.from(hash, 'hex');
+  if (candidate.length !== expected.length) return false;
+  return crypto.timingSafeEqual(candidate, expected);
+}
+
+function createSession() {
+  const id = crypto.randomBytes(32).toString('hex');
+  sessions.set(id, { expiresAt: Date.now() + SESSION_TTL_MS });
+  return id;
+}
+
+function parseCookies(req) {
+  const header = req.headers.cookie || '';
+  const out = {};
+  header.split(';').forEach((part) => {
+    const idx = part.indexOf('=');
+    if (idx === -1) return;
+    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  });
+  return out;
+}
+
+function isLoggedIn(req) {
+  if (!adminEmail || !adminPasswordHash) return false;
+  const cookies = parseCookies(req);
+  const sessionId = cookies[SESSION_COOKIE];
+  if (!sessionId) return false;
+  const session = sessions.get(sessionId);
+  if (!session) return false;
+  if (Date.now() > session.expiresAt) {
+    sessions.delete(sessionId);
+    return false;
+  }
+  return true;
+}
+
+function renderLoginHtml(error) {
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Acceso — Oficina Virtual</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0a0a0a;font-family:Arial,sans-serif;}
+  form{background:#161616;padding:32px;border-radius:12px;width:320px;border:1px solid #2a2a2a;}
+  h1{color:#e5c76b;font-size:20px;margin:0 0 20px;}
+  label{color:#aaa;font-size:13px;display:block;margin:12px 0 4px;}
+  input{width:100%;box-sizing:border-box;padding:10px;border-radius:6px;border:1px solid #333;background:#0f0f0f;color:#fff;font-size:14px;}
+  .pwd-wrap{position:relative;}
+  .pwd-wrap input{padding-right:36px;}
+  .pwd-toggle{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:#888;cursor:pointer;font-size:16px;width:auto;margin:0;padding:2px 4px;}
+  button[type="submit"]{width:100%;margin-top:20px;padding:11px;border:none;border-radius:6px;background:#e5c76b;color:#111;font-weight:bold;cursor:pointer;font-size:14px;}
+  .error{color:#ff6b6b;font-size:13px;margin-top:12px;}
+  .setup-hint{color:#888;font-size:12px;margin-top:16px;text-align:center;}
+  .setup-hint a{color:#e5c76b;}
+</style></head><body>
+<form method="POST" action="/login">
+  <h1>Oficina Virtual — Acceso</h1>
+  <label>Email</label>
+  <input type="email" name="email" required autofocus>
+  <label>Contraseña</label>
+  <div class="pwd-wrap">
+    <input type="password" name="password" id="pwd" required>
+    <button type="button" class="pwd-toggle" onclick="const p=document.getElementById('pwd');p.type=p.type==='password'?'text':'password';this.textContent=p.type==='password'?'👁':'🙈';">👁</button>
+  </div>
+  <button type="submit">Entrar</button>
+  ${error ? '<div class="error">Email o contraseña incorrectos.</div>' : ''}
+  ${!isAdminConfigured() ? '<div class="setup-hint">¿Primera vez? <a href="/setup">Configura tu acceso</a></div>' : ''}
+</form>
+</body></html>`;
+}
+
+function renderSetupHtml(error) {
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Configurar acceso — Oficina Virtual</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0a0a0a;font-family:Arial,sans-serif;}
+  form{background:#161616;padding:32px;border-radius:12px;width:340px;border:1px solid #2a2a2a;}
+  h1{color:#e5c76b;font-size:20px;margin:0 0 8px;}
+  p{color:#888;font-size:13px;margin:0 0 16px;line-height:1.4;}
+  label{color:#aaa;font-size:13px;display:block;margin:12px 0 4px;}
+  input{width:100%;box-sizing:border-box;padding:10px;border-radius:6px;border:1px solid #333;background:#0f0f0f;color:#fff;font-size:14px;}
+  .pwd-wrap{position:relative;}
+  .pwd-wrap input{padding-right:36px;}
+  .pwd-toggle{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:#888;cursor:pointer;font-size:16px;width:auto;margin:0;padding:2px 4px;}
+  button[type="submit"]{width:100%;margin-top:20px;padding:11px;border:none;border-radius:6px;background:#e5c76b;color:#111;font-weight:bold;cursor:pointer;font-size:14px;}
+  .error{color:#ff6b6b;font-size:13px;margin-top:12px;}
+</style></head><body>
+<form method="POST" action="/setup">
+  <h1>Configura tu acceso</h1>
+  <p>Este es el único registro posible — crea el único usuario administrador de esta oficina. Una vez creado, esta pantalla se desactiva.</p>
+  <label>Email</label>
+  <input type="email" name="email" required autofocus>
+  <label>Contraseña</label>
+  <div class="pwd-wrap">
+    <input type="password" name="password" id="pwd" minlength="8" required>
+    <button type="button" class="pwd-toggle" onclick="const p=document.getElementById('pwd');p.type=p.type==='password'?'text':'password';this.textContent=p.type==='password'?'👁':'🙈';">👁</button>
+  </div>
+  <button type="submit">Crear acceso</button>
+  ${error ? '<div class="error">' + error + '</div>' : ''}
+</form>
+</body></html>`;
+}
 const dataFile = String(process.env.DATA_FILE || '/app/data/state.json');
+
+// Admin unico (email + hash de contrasena). Se puede fijar por variables de
+// entorno (ADMIN_EMAIL/ADMIN_PASSWORD_HASH) o crear una vez desde /setup, que
+// se guarda en un archivo junto al resto de datos persistentes. Solo puede
+// existir un admin -- una vez creado (por env o por /setup), /setup se cierra.
+const adminFile = path.join(path.dirname(dataFile), 'admin.json');
+let adminEmail = String(process.env.ADMIN_EMAIL || '');
+let adminPasswordHash = String(process.env.ADMIN_PASSWORD_HASH || '');
+
+function loadAdminFromFile() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(adminFile, 'utf8'));
+    if (raw.email && raw.passwordHash) {
+      adminEmail = raw.email;
+      adminPasswordHash = raw.passwordHash;
+    }
+  } catch {
+    // sin archivo todavia, o vacio -- normal en primer arranque
+  }
+}
+
+function isAdminConfigured() {
+  return Boolean(adminEmail && adminPasswordHash);
+}
+
+function saveAdminToFile(email, passwordHash) {
+  fs.mkdirSync(path.dirname(adminFile), { recursive: true });
+  fs.writeFileSync(adminFile, JSON.stringify({ email, passwordHash }, null, 2));
+  adminEmail = email;
+  adminPasswordHash = passwordHash;
+}
+
+function hashPasswordForStorage(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return salt + ':' + hash;
+}
+
 // URL publica de esta oficina, solo para el widget opcional de WordPress
 // (renderWordpressEmbedJs) — sin configurar, ese widget no funciona pero el
 // resto de la oficina va igual. Nunca hardcodear un dominio real aqui.
@@ -2252,11 +2400,73 @@ function isAuthorized(req) {
   return req.headers['x-ceo-token'] === ceoPanelToken;
 }
 
+function isHeartbeatAuthorized(req) {
+  if (!heartbeatToken) return false;
+  return req.headers['x-heartbeat-token'] === heartbeatToken;
+}
+
+// Proteccion tipo PlugfyGuard (bloqueo por fuerza bruta) para los endpoints
+// protegidos por token de este servidor: no hay login de usuario aqui, asi
+// que en vez de intentos de contrasena se cuentan respuestas 401 por IP.
+const failedAuthAttempts = new Map();
+const RATE_LIMIT_MAX = 5;
+const RATE_LIMIT_WINDOW_MS = 30 * 60 * 1000;
+
+function getClientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) return String(xff).split(',')[0].trim();
+  return req.socket.remoteAddress || 'unknown';
+}
+
+function isRateLimited(ip) {
+  const rec = failedAuthAttempts.get(ip);
+  return !!(rec && rec.blockedUntil && Date.now() < rec.blockedUntil);
+}
+
+function recordFailedAuth(ip) {
+  const now = Date.now();
+  let rec = failedAuthAttempts.get(ip);
+  if (!rec || now - rec.windowStart > RATE_LIMIT_WINDOW_MS) {
+    rec = { count: 0, windowStart: now, blockedUntil: 0 };
+  }
+  rec.count += 1;
+  if (rec.count >= RATE_LIMIT_MAX) rec.blockedUntil = now + RATE_LIMIT_WINDOW_MS;
+  failedAuthAttempts.set(ip, rec);
+}
+
+// Solo las rutas protegidas por token pueden bloquear una IP. Las paginas
+// publicas (/office, /operations, /manual, /api/agents, etc.) nunca deben
+// poder quedar bloqueadas por esto -- si no, un fallo de deteccion de IP
+// detras de Traefik (o varias personas compartiendo la misma IP publica,
+// como una oficina) tumbaria el panel para todo el mundo, no solo para
+// quien esta probando el token.
+function isTokenProtectedPath(pathname) {
+  if (pathname === '/login') return true;
+  if (pathname === '/api/heartbeat') return true;
+  if (pathname === '/api/agents/remove') return true;
+  if (pathname === '/api/instructions') return true;
+  if (pathname === '/api/business-metrics') return true;
+  if (/^\/api\/social-executions\/\d+$/.test(pathname)) return true;
+  if (/^\/api\/work-executions\/\d+$/.test(pathname)) return true;
+  return false;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://localhost:${port}`);
+  const clientIp = getClientIp(req);
+  const protectedPath = isTokenProtectedPath(url.pathname);
+  if (protectedPath && isRateLimited(clientIp)) {
+    json(res, 429, { error: 'Demasiados intentos fallidos, reintenta mas tarde' });
+    return;
+  }
+  if (protectedPath) {
+    res.on('finish', () => {
+      if (res.statusCode === 401) recordFailedAuth(clientIp);
+    });
+  }
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Heartbeat-Token, X-CEO-Token');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -2268,6 +2478,99 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(renderStatusHtml());
     return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/login') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(renderLoginHtml(url.searchParams.get('error')));
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/login') {
+    try {
+      const body = await readBody(req);
+      const params = new URLSearchParams(body);
+      const email = (params.get('email') || '').trim().toLowerCase();
+      const password = params.get('password') || '';
+      const ok = adminEmail && adminPasswordHash
+        && email === adminEmail.toLowerCase()
+        && verifyPassword(password, adminPasswordHash);
+      if (!ok) {
+        recordFailedAuth(clientIp);
+        res.writeHead(302, { Location: '/login?error=1' });
+        res.end();
+        return;
+      }
+      const sessionId = createSession();
+      res.writeHead(302, {
+        Location: '/office',
+        'Set-Cookie': `${SESSION_COOKIE}=${sessionId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+      });
+      res.end();
+    } catch {
+      res.writeHead(302, { Location: '/login?error=1' });
+      res.end();
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/setup') {
+    if (isAdminConfigured()) {
+      res.writeHead(302, { Location: '/login' });
+      res.end();
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(renderSetupHtml(url.searchParams.get('error')));
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/setup') {
+    if (isAdminConfigured()) {
+      json(res, 403, { error: 'Ya existe un usuario administrador -- no se pueden crear mas.' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const params = new URLSearchParams(body);
+      const email = (params.get('email') || '').trim().toLowerCase();
+      const password = params.get('password') || '';
+      if (!email || password.length < 8) {
+        res.writeHead(302, { Location: '/setup?error=' + encodeURIComponent('Email valido y contraseña de al menos 8 caracteres.') });
+        res.end();
+        return;
+      }
+      saveAdminToFile(email, hashPasswordForStorage(password));
+      const sessionId = createSession();
+      res.writeHead(302, {
+        Location: '/office',
+        'Set-Cookie': `${SESSION_COOKIE}=${sessionId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+      });
+      res.end();
+    } catch {
+      res.writeHead(302, { Location: '/setup?error=' + encodeURIComponent('Algo fallo, intentalo de nuevo.') });
+      res.end();
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/logout') {
+    const cookies = parseCookies(req);
+    if (cookies[SESSION_COOKIE]) sessions.delete(cookies[SESSION_COOKIE]);
+    res.writeHead(302, {
+      Location: '/login',
+      'Set-Cookie': `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`,
+    });
+    res.end();
+    return;
+  }
+
+  if (req.method === 'GET' && (url.pathname === '/office' || url.pathname === '/operations' || url.pathname === '/manual')) {
+    if (!isLoggedIn(req)) {
+      res.writeHead(302, { Location: '/login' });
+      res.end();
+      return;
+    }
   }
 
   if (req.method === 'GET' && url.pathname === '/office') {
@@ -2295,6 +2598,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/info') {
+    if (!isLoggedIn(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
     const list = publicAgents();
     const metrics = computeMetrics(list);
     json(res, 200, {
@@ -2311,6 +2618,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/metrics') {
+    if (!isLoggedIn(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
     const list = publicAgents();
     json(res, 200, { agents: list, metrics: computeMetrics(list), businessMetrics: publicBusinessMetrics() });
     return;
@@ -2340,11 +2651,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/agents') {
+    if (!isLoggedIn(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
     json(res, 200, { agents: publicAgents() });
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/api/events') {
+    if (!isLoggedIn(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
     json(res, 200, { events, lastEventId: events.at(-1)?.id || 0 });
     return;
   }
@@ -2359,6 +2678,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/heartbeat') {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
     try {
       const body = await readBody(req);
       const payload = JSON.parse(body || '{}');
@@ -2384,6 +2707,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/agents/remove') {
+    if (!isAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
     try {
       const body = await readBody(req);
       const payload = JSON.parse(body || '{}');
@@ -2487,13 +2814,18 @@ const server = http.createServer(async (req, res) => {
 });
 
 const wss = new WebSocketServer({ server, path: '/ws' });
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  if (!isLoggedIn(req)) {
+    ws.close(4401, 'Unauthorized');
+    return;
+  }
   clients.add(ws);
   ws.send(JSON.stringify({ type: 'agents', agents: publicAgents() }));
   ws.on('close', () => clients.delete(ws));
 });
 
 loadState();
+loadAdminFromFile();
 setInterval(sweepAgents, 5000);
 
 server.listen(port, () => {

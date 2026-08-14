@@ -13,17 +13,25 @@ cd miniverse-office
 cp .env.example .env
 ```
 
-Edita `.env` y pon un `CEO_PANEL_TOKEN` real (cualquier cadena larga, por ejemplo
-generada con `openssl rand -hex 32`). Este token es lo único que hace falta para
-usar la consola de órdenes — sin él, nadie puede dar instrucciones a los
-trabajadores.
+Edita `.env` y pon valores reales (cualquier cadena larga y aleatoria, por
+ejemplo generada con `openssl rand -hex 32`, o con el comando de Node que
+indica cada comentario en `.env.example`):
+
+- `CEO_PANEL_TOKEN` — para la consola de órdenes.
+- `HEARTBEAT_TOKEN` — para que tus automatizaciones puedan reportar estado real
+  (sin esto, `POST /api/heartbeat` responde 401 a propósito).
+
+`ADMIN_EMAIL`/`ADMIN_PASSWORD_HASH` puedes dejarlos vacíos — se configuran
+desde el navegador en el primer arranque (ver más abajo).
 
 ```bash
 cp docker-compose.example.yml docker-compose.yml
 docker compose up -d --build
 ```
 
-Abre `http://localhost:4321/office`.
+Abre `http://localhost:4321/setup` y crea tu único usuario administrador
+(email + contraseña) — es un registro de un solo uso, se bloquea después. A
+partir de ahí entras por `http://localhost:4321/login`.
 
 ### Publicarlo con tu dominio (HTTPS)
 
@@ -46,7 +54,9 @@ npm start
 | `PORT`                | `4321`                  | Puerto donde escucha el servidor            |
 | `OFFLINE_TIMEOUT_MS`  | `900000` (15 min)       | Tras cuánto tiempo sin heartbeat un trabajador pasa a "dormido", y el doble a "desconectado" |
 | `CEO_PANEL_TOKEN`     | *(vacío — obligatorio)* | Token privado para la consola de órdenes    |
-| `DATA_FILE`           | `/app/data/state.json`  | Dónde se guarda el estado persistente       |
+| `HEARTBEAT_TOKEN`     | *(vacío — obligatorio)* | Token que deben mandar tus automatizaciones en `POST /api/heartbeat` |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD_HASH` | *(vacío)* | Credenciales del único admin — mejor dejarlos vacíos y crear el usuario desde `/setup` en el navegador |
+| `DATA_FILE`           | `/app/data/state.json`  | Dónde se guarda el estado persistente (y, junto a él, `admin.json` si usaste `/setup`) |
 
 ## Primer arranque: ¿con o sin trabajadores?
 
@@ -59,7 +69,10 @@ funciona antes de configurar el tuyo.
 ## Verificar que funciona
 
 ```bash
-curl http://localhost:4321/api/info
+curl -o /dev/null -s -w "%{http_code}\n" http://localhost:4321/setup
 ```
 
-Debe devolver un JSON con `"miniverse": true` y el número de agentes cargados.
+Debe devolver `200` (pantalla de registro) si es tu primer arranque, o `302`
+(redirige a `/login`) si ya creaste tu usuario. `/api/info` y `/api/metrics`
+ahora exigen sesión iniciada — para probarlos hazlo desde el navegador ya
+logueado, no con `curl` suelto.

@@ -9,6 +9,8 @@ nombres de las variables necesarias, sin valores reales. `.env` está en
 | Secreto                | Dónde vive                        |
 |-------------------------|------------------------------------|
 | `CEO_PANEL_TOKEN`       | `.env` (variable de entorno)       |
+| `HEARTBEAT_TOKEN`       | `.env` (variable de entorno) — también debe configurarse en cada automatización que llame a `POST /api/heartbeat` |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD_HASH` | `.env` — el hash se genera una vez, nunca se guarda la contraseña en texto plano |
 | Credenciales de tu automatización real (n8n, APIs...) | En la config de `office-reality-sync/`, nunca en `server.js` |
 
 ## Qué NO debe subirse nunca a un repo (público o privado compartido)
@@ -34,10 +36,35 @@ rotación automática — trátalo como una contraseña: no lo compartas fuera d
 equipo, y cámbialo si sospechas que se filtró (basta con editar `.env` y
 reiniciar el contenedor).
 
-Los endpoints de solo lectura (`/api/info`, `/api/metrics`) son públicos por
-diseño — pensados para que la oficina se pueda mostrar sin autenticación. Si tu
-información de negocio es sensible, no expongas el servicio a internet sin un
-proxy con autenticación adicional delante.
+## El token de heartbeat
+
+`POST /api/heartbeat` y `POST /api/agents/remove` exigen la cabecera
+`X-Heartbeat-Token` con el valor de `HEARTBEAT_TOKEN`. Sin esto, cualquiera en
+internet podría escribir o borrar datos del panel — por eso es obligatorio,
+no opcional. Cada automatización que reporte estado real (n8n, un script, lo
+que sea) debe mandar esa cabecera. Si tras un cambio de token tus
+automatizaciones dejan de reportar, revisa que también se haya actualizado
+ahí, no solo en `.env` del panel.
+
+Hay además un límite de intentos fallidos por IP (5 fallos → bloqueo de 30
+minutos) en los endpoints protegidos por token, para frenar intentos de
+adivinar el token a fuerza bruta. Este bloqueo nunca afecta a las páginas
+públicas de solo lectura, solo a los endpoints que escriben/borran datos.
+
+## Login del panel
+
+`/office`, `/operations`, `/manual`, `/api/agents`, `/api/events` y el
+WebSocket (`/ws`) exigen sesión iniciada (`ADMIN_EMAIL` + `ADMIN_PASSWORD_HASH`
+en `.env`). Sin esas dos variables configuradas, el login queda deshabilitado
+y esas rutas son inaccesibles — configúralas antes de desplegar en producción.
+La contraseña se guarda solo como hash (scrypt), nunca en texto plano — no la
+reutilices de otro sistema (SSH, hosting, etc.): si el panel se viera
+comprometido alguna vez, esa contraseña no debe abrir nada más.
+
+Los únicos endpoints de solo lectura que siguen siendo públicos por diseño son
+`/api/info` y `/api/metrics` (pensados para mostrarse sin login, ej. en un
+embed). Si tu información de negocio es sensible, no expongas ni siquiera esos
+a internet sin un proxy con autenticación adicional delante.
 
 ## Antes de cada `git push`
 

@@ -1,0 +1,76 @@
+[
+  {
+    "name": "EJEMPLO - Reportar tarea diaria al panel",
+    "nodes": [
+      {
+        "parameters": { "rule": { "interval": [{ "field": "days", "triggerAtHour": 9 }] } },
+        "id": "ejemplo-cron",
+        "name": "Cron diario 09:00",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [-800, 0]
+      },
+      {
+        "parameters": { "httpMethod": "POST", "path": "ejemplo-prueba-manual", "responseMode": "responseNode", "options": {} },
+        "id": "ejemplo-webhook",
+        "name": "Webhook (prueba manual)",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [-800, 160],
+        "webhookId": "ejemplo-prueba-manual"
+      },
+      {
+        "parameters": {
+          "jsCode": "// Aqui es donde tu automatizacion real hace su trabajo: generar contenido con\n// una IA, revisar un pedido, comprobar un estado, lo que sea. Este ejemplo no\n// llama a ninguna API externa a proposito, para que se pueda probar sin\n// necesitar ninguna clave -- sustituye esto por tu logica real (ej. una\n// llamada HTTP a OpenAI/Anthropic/lo que uses, como se hace en los workflows\n// reales de https://github.com/Plugfypro/miniverse-office/tree/main o como\n// construye Virtual Marketing Spain estas automatizaciones como servicio).\nconst tarea = 'Tarea de ejemplo generada el ' + new Date().toISOString().slice(0, 10) + ' -- sustituir por el resultado real de tu automatizacion.';\n\nreturn [{\n  json: {\n    agent: 'trabajador_ejemplo',\n    state: 'working',\n    task: tarea,\n    metadata: { source: 'n8n-ejemplo', static: true, seededAt: new Date().toISOString() },\n  },\n}];"
+        },
+        "id": "ejemplo-preparar",
+        "name": "Preparar heartbeat",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [-576, 80]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://localhost:4321/api/heartbeat",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              { "name": "Content-Type", "value": "application/json" },
+              { "name": "X-Heartbeat-Token", "value": "PON_AQUI_TU_HEARTBEAT_TOKEN" }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ agent: $json.agent, state: $json.state, task: $json.task, metadata: $json.metadata }) }}",
+          "options": {}
+        },
+        "id": "ejemplo-guardar",
+        "name": "Guardar en panel oficina",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [-352, 80]
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { ok: true, task: $('Preparar heartbeat').item.json.task } }}",
+          "options": {}
+        },
+        "id": "ejemplo-responder",
+        "name": "Responder (prueba)",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.1,
+        "position": [-128, 80]
+      }
+    ],
+    "connections": {
+      "Cron diario 09:00": { "main": [[{ "node": "Preparar heartbeat", "type": "main", "index": 0 }]] },
+      "Webhook (prueba manual)": { "main": [[{ "node": "Preparar heartbeat", "type": "main", "index": 0 }]] },
+      "Preparar heartbeat": { "main": [[{ "node": "Guardar en panel oficina", "type": "main", "index": 0 }]] },
+      "Guardar en panel oficina": { "main": [[{ "node": "Responder (prueba)", "type": "main", "index": 0 }]] }
+    },
+    "settings": { "executionOrder": "v1" },
+    "active": false
+  }
+]

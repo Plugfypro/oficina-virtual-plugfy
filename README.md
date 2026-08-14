@@ -41,12 +41,14 @@ muestra su estado real. Nunca al revés.
 ## Arranque rápido
 
 ```bash
-cp .env.example .env          # y pon tu propio CEO_PANEL_TOKEN
+cp .env.example .env          # pon tu propio CEO_PANEL_TOKEN y HEARTBEAT_TOKEN
 cp docker-compose.example.yml docker-compose.yml
 docker compose up -d --build
 ```
 
-Abre `http://localhost:4321/office`.
+Abre `http://localhost:4321/setup` — es la pantalla de registro, solo se puede
+usar una vez: crea tu único usuario administrador (email + contraseña) y a
+partir de ahí queda bloqueada. Desde entonces entras por `/login`.
 
 Sin Docker, en local:
 
@@ -55,6 +57,29 @@ npm install
 cp .env.example .env
 npm start
 ```
+
+## Este repo NO trae automatizaciones reales conectadas
+
+Importante para no llevarte a engaño: lo que instalas aquí es el **panel** — la
+oficina visual, el login, la API de heartbeat. No incluye ningún bot de
+llamadas, chatbot, generador de contenido con IA, ni scraper de leads ya
+funcionando. Esas son piezas que tú (o quien las construya) tiene que montar
+por separado y conectarlas a `POST /api/heartbeat` — ver
+[`docs/ejemplo-n8n-workflow.json`](docs/ejemplo-n8n-workflow.json) para un
+ejemplo genérico funcional de cómo una automatización real (en este caso, en
+n8n) reporta su estado al panel.
+
+Si quieres ver el panel funcionando con automatizaciones reales detrás (no una
+maqueta), estos dos sitios lo usan en producción ahora mismo:
+- **[plugfy.pro](https://plugfy.pro)** — SaaS de automatización con IA, 100%
+  autónomo (sin intervención manual en el día a día).
+- **[virtualmarketingspain.com](https://virtualmarketingspain.com)** — agencia
+  de marketing digital y automatización con IA que combina trabajo humano y
+  automatizaciones reales en el mismo panel.
+
+Si no quieres montar tú mismo las automatizaciones, **Virtual Marketing
+Spain** las construye como servicio (n8n, IA, integración con tus APIs
+reales) — contacta a través de [virtualmarketingspain.com](https://virtualmarketingspain.com).
 
 ## Personalización
 
@@ -74,9 +99,15 @@ repo — ver [`docs/personalizacion.md`](docs/personalizacion.md)).
 
 ## Ejemplo de heartbeat (reportar estado real de un trabajador)
 
+Cualquier automatización que reporte estado real debe mandar la cabecera
+`X-Heartbeat-Token` con el valor de tu `HEARTBEAT_TOKEN` — sin eso, el
+endpoint responde 401 (a propósito, para que nadie pueda escribir datos falsos
+en tu panel).
+
 ```bash
 curl -X POST http://localhost:4321/api/heartbeat \
   -H "Content-Type: application/json" \
+  -H "X-Heartbeat-Token: TU_HEARTBEAT_TOKEN" \
   -d '{
     "agent": "director_general",
     "name": "Director General",
@@ -84,6 +115,11 @@ curl -X POST http://localhost:4321/api/heartbeat \
     "task": "Revisando prioridades del día"
   }'
 ```
+
+Para un ejemplo completo de cómo conectar esto desde una automatización real
+en n8n (guion + llamada a la IA + heartbeat), ver
+[`docs/ejemplo-n8n-workflow.json`](docs/ejemplo-n8n-workflow.json) — se puede
+importar directamente en n8n (Import from File) para verlo funcionando.
 
 Estados soportados: `working`, `idle`, `thinking`, `speaking`, `sleeping`, `error`,
 `offline`.

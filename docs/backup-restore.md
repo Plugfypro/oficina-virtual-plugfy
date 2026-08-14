@@ -7,6 +7,11 @@ Todo el estado real vive en dos sitios:
 1. **`data/state.json`** — agentes, instrucciones, ejecuciones, métricas de
    negocio. Se reescribe en cada cambio.
 2. **`config/mission-data.json`** — tu equipo real (si lo has configurado).
+3. **`data/admin.json`** — solo existe si creaste tu usuario desde `/setup`
+   (en vez de por variables de entorno). Guarda el email y el hash de la
+   contraseña del único admin — sin este archivo (y sin `ADMIN_EMAIL`/
+   `ADMIN_PASSWORD_HASH` en `.env`), perderías el acceso y tendrías que volver
+   a pasar por `/setup`. Haz backup de él junto a `state.json`.
 
 Todo lo demás (`server.js`, `docker-compose.yml`...) es código, no estado — vive
 en tu propio control de versiones o copia local, no necesita backup aparte del

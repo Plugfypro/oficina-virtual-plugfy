@@ -3,14 +3,16 @@
 ## Modo cliente: clonar el sistema para otro negocio
 
 1. Clona (o haz fork de) este repositorio.
-2. `cp .env.example .env` y pon un `CEO_PANEL_TOKEN` propio para ese cliente
-   (nunca reutilices el mismo token entre despliegues distintos).
+2. `cp .env.example .env` y pon un `CEO_PANEL_TOKEN` y `HEARTBEAT_TOKEN`
+   propios para ese cliente (nunca reutilices los mismos tokens entre
+   despliegues distintos).
 3. Crea su `config/mission-data.json` propio (ver
    [personalización](personalizacion.md)) con su equipo, sus marcas y su
    ritmo real — no el tuyo.
-4. Despliega en su propio contenedor/dominio. Cada cliente = su propio
-   `data/state.json`, su propio token, su propia config. Nunca compartas
-   contenedor ni token entre dos negocios distintos.
+4. Despliega en su propio contenedor/dominio y crea su usuario desde `/setup`
+   (una vez, se bloquea después). Cada cliente = su propio `data/state.json`,
+   sus propios tokens, su propio admin, su propia config. Nunca compartas
+   contenedor, tokens ni login entre dos negocios distintos.
 
 ## Separar la base pública de tu capa privada de implementación
 
@@ -32,19 +34,19 @@ tabla. Resumen:
 
 1. Clonar el repo en el servidor.
 2. Instalar Docker + Docker Compose si no están.
-3. `cp .env.example .env` → rellenar `CEO_PANEL_TOKEN` real.
+3. `cp .env.example .env` → rellenar `CEO_PANEL_TOKEN` y `HEARTBEAT_TOKEN`
+   reales.
 4. `cp docker-compose.example.yml docker-compose.yml` → ajustar si usas
    reverse proxy propio.
 5. Crear `config/mission-data.json` con el equipo real de ese cliente (o
    dejarlo sin crear para arrancar con el ejemplo mientras se configura).
 6. `docker compose up -d --build`.
-7. Verificar `curl http://localhost:4321/api/info` → debe responder con
-   `"miniverse": true`.
+7. Abrir `/setup` y crear el único usuario administrador de ese cliente.
 8. Si se va a exponer públicamente, configurar el reverse proxy/dominio.
-9. Programar backup periódico de `data/state.json` (ver
+9. Programar backup periódico de `data/state.json` y `data/admin.json` (ver
    [backup y restauración](backup-restore.md)).
-10. Guardar el `CEO_PANEL_TOKEN` en un gestor de contraseñas — es lo único
-    que hace falta para dar órdenes desde `/office`.
+10. Guardar el `CEO_PANEL_TOKEN`, `HEARTBEAT_TOKEN` y las credenciales del
+    admin en un gestor de contraseñas.
 
 ## Autoría y marca
 
