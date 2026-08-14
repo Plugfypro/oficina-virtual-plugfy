@@ -38,6 +38,16 @@ function parseCookies(req) {
   return out;
 }
 
+// Para endpoints de LECTURA llamados tanto por el navegador (sesion) como por
+// automatizaciones de servidor a servidor (n8n, etc. -- nunca tienen cookie
+// de sesion). Acepta cualquiera de los dos. Las paginas HTML y el WebSocket
+// siguen siendo solo-sesion (isLoggedIn), nunca deben aceptar el token.
+function isLoggedInOrAutomation(req) {
+  if (isLoggedIn(req)) return true;
+  if (!heartbeatToken) return false;
+  return req.headers['x-heartbeat-token'] === heartbeatToken;
+}
+
 function isLoggedIn(req) {
   if (!adminEmail || !adminPasswordHash) return false;
   const cookies = parseCookies(req);
@@ -2598,7 +2608,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/info') {
-    if (!isLoggedIn(req)) {
+    if (!isLoggedInOrAutomation(req)) {
       json(res, 401, { error: 'Unauthorized' });
       return;
     }
@@ -2618,7 +2628,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/metrics') {
-    if (!isLoggedIn(req)) {
+    if (!isLoggedInOrAutomation(req)) {
       json(res, 401, { error: 'Unauthorized' });
       return;
     }
@@ -2651,7 +2661,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/agents') {
-    if (!isLoggedIn(req)) {
+    if (!isLoggedInOrAutomation(req)) {
       json(res, 401, { error: 'Unauthorized' });
       return;
     }
@@ -2660,7 +2670,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/api/events') {
-    if (!isLoggedIn(req)) {
+    if (!isLoggedInOrAutomation(req)) {
       json(res, 401, { error: 'Unauthorized' });
       return;
     }
