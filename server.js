@@ -175,6 +175,14 @@ const events = [];
 const instructions = [];
 const socialExecutions = [];
 const workExecutions = [];
+const reportes = [];
+const reportesDir = path.join(path.dirname(dataFile), 'reportes');
+const conversaciones = [];
+const flyers = [];
+const calendario = [];
+const N8N_INBOX_WEBHOOK_URL = String(process.env.N8N_INBOX_WEBHOOK_URL || '');
+const N8N_INBOX_TOKEN = String(process.env.N8N_INBOX_TOKEN || '');
+const N8N_FLYER_PUBLICAR_URL = String(process.env.N8N_FLYER_PUBLICAR_URL || '');
 const businessMetrics = {
   ventas: 0,
   captaciones: 0,
@@ -193,6 +201,11 @@ let nextEventId = 1;
 let nextInstructionId = 1;
 let nextSocialExecutionId = 1;
 let nextWorkExecutionId = 1;
+let nextReporteId = 1;
+let nextConversacionId = 1;
+let nextMensajeId = 1;
+let nextFlyerId = 1;
+let nextCalendarioId = 1;
 
 const TEAM_RESOURCES = {
   community: [
@@ -274,6 +287,23 @@ function loadState() {
       workExecutions.splice(0, workExecutions.length, ...parsed.workExecutions);
       nextWorkExecutionId = (workExecutions.at(-1)?.id || 0) + 1;
     }
+    if (Array.isArray(parsed.reportes)) {
+      reportes.splice(0, reportes.length, ...parsed.reportes);
+      nextReporteId = (reportes.at(-1)?.id || 0) + 1;
+    }
+    if (Array.isArray(parsed.conversaciones)) {
+      conversaciones.splice(0, conversaciones.length, ...parsed.conversaciones);
+      nextConversacionId = Math.max(0, ...conversaciones.map((c) => c.id || 0)) + 1;
+      nextMensajeId = Math.max(0, ...conversaciones.flatMap((c) => (c.mensajes || []).map((m) => m.id || 0))) + 1;
+    }
+    if (Array.isArray(parsed.flyers)) {
+      flyers.splice(0, flyers.length, ...parsed.flyers);
+      nextFlyerId = Math.max(0, ...flyers.map((f) => f.id || 0)) + 1;
+    }
+    if (Array.isArray(parsed.calendario)) {
+      calendario.splice(0, calendario.length, ...parsed.calendario);
+      nextCalendarioId = Math.max(0, ...calendario.map((c) => c.id || 0)) + 1;
+    }
     if (Array.isArray(parsed.agents)) {
       agents.clear();
       for (const agent of parsed.agents) {
@@ -297,6 +327,10 @@ function saveState() {
       instructions,
       socialExecutions,
       workExecutions,
+      reportes,
+      conversaciones,
+      flyers,
+      calendario,
       businessMetrics,
     }, null, 2), 'utf8');
   } catch (error) {
@@ -377,6 +411,112 @@ function heartbeat(payload) {
 
 function publicAgents() {
   return Array.from(agents.values()).map((agent) => sanitizeDeep(agent));
+}
+
+const CANALES_INBOX = new Set(['email', 'whatsapp', 'instagram', 'web', 'voz']);
+
+function encontrarOCrearConversacion(canal, identificador, nombreContacto) {
+  let conv = conversaciones.find((c) => c.canal === canal && c.identificador === identificador);
+  if (!conv) {
+    conv = {
+      id: nextConversacionId++,
+      canal,
+      identificador,
+      nombreContacto: sanitizeSpanishText(nombreContacto || identificador),
+      etiquetas: [],
+      estado: 'abierta',
+      mensajes: [],
+      sugerenciaIA: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    conversaciones.push(conv);
+  }
+  return conv;
+}
+
+function agregarMensajeInbox(payload) {
+  const canal = String(payload.canal || '').toLowerCase();
+  if (!CANALES_INBOX.has(canal)) throw new Error('canal_invalido');
+  const identificador = String(payload.identificador || '').trim();
+  if (!identificador) throw new Error('falta_identificador');
+  const conv = encontrarOCrearConversacion(canal, identificador, payload.nombreContacto);
+  const mensaje = {
+    id: nextMensajeId++,
+    autor: payload.autor === 'contacto' ? 'contacto' : 'sistema',
+    texto: sanitizeSpanishText(String(payload.texto || '')),
+    timestamp: Date.now(),
+  };
+  conv.mensajes.push(mensaje);
+  if (conv.mensajes.length > 100) conv.mensajes.shift();
+  if (payload.sugerenciaIA) {
+    conv.sugerenciaIA = sanitizeSpanishText(String(payload.sugerenciaIA));
+  }
+  conv.estado = 'abierta';
+  conv.updatedAt = Date.now();
+  if (conversaciones.length > 500) {
+    conversaciones.sort((a, b) => a.updatedAt - b.updatedAt);
+    conversaciones.shift();
+  }
+  saveState();
+  return conv;
+}
+
+function publicConversaciones() {
+  return conversaciones
+    .slice()
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .map((c) => ({
+      ...c,
+      ultimoMensaje: c.mensajes.at(-1) || null,
+      mensajes: undefined,
+    }));
+}
+
+async function enviarRespuestaInbox(conv, texto) {
+  if (!N8N_INBOX_WEBHOOK_URL) throw new Error('N8N_INBOX_WEBHOOK_URL no configurado');
+  const resp = await fetch(N8N_INBOX_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Inbox-Token': N8N_INBOX_TOKEN },
+    body: JSON.stringify({
+      conversacionId: conv.id,
+      canal: conv.canal,
+      identificador: conv.identificador,
+      texto,
+    }),
+  });
+  if (!resp.ok) {
+    const raw = await resp.text().catch(() => '');
+    throw new Error('n8n respondio ' + resp.status + ': ' + raw.slice(0, 200));
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (data.ok === false) {
+    throw new Error(data.error || 'El envio no se pudo completar');
+  }
+  return data;
+}
+
+async function publicarFlyerInstagram(flyer) {
+  if (!N8N_FLYER_PUBLICAR_URL) throw new Error('N8N_FLYER_PUBLICAR_URL no configurado');
+  const resp = await fetch(N8N_FLYER_PUBLICAR_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Inbox-Token': N8N_INBOX_TOKEN },
+    body: JSON.stringify({
+      marca: flyer.marca,
+      formato: flyer.formato,
+      imagenUrl: flyer.imagenUrl,
+      caption: flyer.caption,
+    }),
+  });
+  if (!resp.ok) {
+    const raw = await resp.text().catch(() => '');
+    throw new Error('n8n respondio ' + resp.status + ': ' + raw.slice(0, 200));
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (data.ok === false) {
+    throw new Error(data.error || 'El envio no se pudo completar');
+  }
+  return data;
 }
 
 function pushEvent(agentId, action) {
@@ -880,7 +1020,107 @@ function setBusinessMetrics(payload = {}) {
   return publicBusinessMetrics();
 }
 
-function pushInstruction(payload) {
+// Disparadores reales de n8n para ordenes del CEO -- antes de esto
+// pushInstruction solo guardaba texto y fabricaba una simulacion visual
+// (maybeCreateSocialExecution/maybeCreateWorkExecutions), sin ejecutar nada
+// de verdad. Ahora, si el mensaje coincide con alguna de estas reglas, se
+// llama al webhook REAL del workflow n8n correspondiente (mismos webhooks de
+// prueba ya usados y verificados durante esta sesion) y el resultado REAL
+// (exito o fallo) viaja en la respuesta, en vez de una ejecucion inventada.
+// Una orden puede disparar varios workflows a la vez (ej. "revisad SEO y
+// generad contenido" dispara los dos).
+const N8N_BASE = 'https://n8n.srv1836153.hstgr.cloud/webhook/';
+const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '');
+
+// Catalogo de automatizaciones reales disponibles -- 'descripcion' es lo que
+// lee la IA para decidir si una orden en lenguaje natural del CEO encaja,
+// asi que hay que mantenerlo honesto: si algo no esta aqui, no existe de
+// verdad todavia (ej: Stories, Reels, reutilizar publicaciones antiguas).
+const REGLAS_AUTOMATIZACION_REAL = [
+  { intento: 'publicar_instagram', descripcion: 'Publicar en el feed de Instagram el siguiente contenido nuevo ya preparado en la cola, para cualquiera de las 4 marcas. NO sirve para Stories, Reels, ni para reutilizar publicaciones antiguas -- eso no existe todavia.', re: /\bpublica(r|d|mos|ndo|lo|los)?\b|\bpubliquen\b/i, path: 'instagram-publicar-trigger-prueba', method: 'GET' },
+  { intento: 'publicar_flyer', descripcion: 'Generar y publicar HOY un Flyer (imagen fija) nuevo en Instagram para la marca que toque segun el calendario de contenido, en feed y tambien como Story si el calendario lo indica.', re: /\bflyers?\b/i, path: 'flyer-diario-test', method: 'POST' },
+  { intento: 'publicar_reel', descripcion: 'Generar y publicar HOY un Reel (video corto) nuevo en Instagram para la marca que toque segun el calendario de contenido, en feed y tambien como Story si el calendario lo indica. Reels SI existe y funciona de verdad.', re: /\breels?\b|\bvideos?\b/i, path: 'reel-diario-test', method: 'POST' },
+  { intento: 'auditoria_seo', descripcion: 'Auditoria semanal de SEO/GEO/AEO de las webs propias.', re: /\bseo\b/i, path: 'seo-auditoria-test', method: 'POST' },
+  { intento: 'auditoria_web', descripcion: 'Auditoria de conversion/UX de las webs propias (landing, CTAs, estructura).', re: /\bweb\b/i, path: 'auditoria-web-test', method: 'POST' },
+  { intento: 'pentest_seguridad', descripcion: 'Auditoria tecnica de seguridad (cabeceras HTTPS, exposicion de version de WordPress, etc.) de las webs propias y de clientes.', re: /\bpentest\b|\bseguridad\b|\bauditor[ií]a?\s*t[eé]cnica\b/i, path: 'pentest-revisar-ahora', method: 'POST' },
+  { intento: 'generar_contenido', descripcion: 'Generar contenido nuevo de texto/copy para redes sociales para las 4 marcas (no genera la imagen, solo el texto).', re: /\bgenerad?\s*contenido\b|\bcontenido\s*nuevo\b/i, path: 'generador-contenido-test', method: 'POST' },
+  { intento: 'ideas_virales', descripcion: 'Generar ideas de video/reel con gancho y guion, basadas en formatos probados (no en tendencias en tiempo real).', re: /\bideas?\s*virales?\b/i, path: 'ideas-virales-test', method: 'POST' },
+  { intento: 'gmb_contenido', descripcion: 'Generar y preparar publicaciones para las fichas de Google Business de los distintos negocios.', re: /\bgmb\b|\bgoogle\s*business\b|\bficha\s*de\s*google\b/i, path: 'gmb-contenido-test', method: 'POST' },
+  { intento: 'reporte_diario', descripcion: 'Generar el reporte ejecutivo diario para el CEO con el estado de la oficina y las automatizaciones.', re: /\breporte\b/i, path: 'reporte-diario-test', method: 'POST' },
+  { intento: 'revisar_correos', descripcion: 'Revisar y clasificar los correos de Gmail pendientes.', re: /\bcorreos?\b|\bgmail\b|\bemails?\b/i, path: 'gmail-revisar-ahora', method: 'POST' },
+  { intento: 'plugfyguard_vigilancia', descripcion: 'Vigilancia de seguridad especifica de PlugfyGuard sobre las apps propias (Plugfy panel, Gramflow).', re: /\bplugfyguard\b/i, path: 'plugfyguard-revisar-ahora', method: 'POST' },
+  { intento: 'vigilancia_alertas', descripcion: 'Vigilancia general 24/7 y alertas sobre el estado de las automatizaciones y sistemas propios.', re: /\balertas?\b|\bvigilancia\b/i, path: 'alertas-test', method: 'POST' },
+  { intento: 'auditoria_empresa', descripcion: 'Preparar una auditoria/informe para un cliente o empresa nueva (no una de las 4 marcas propias).', re: /\bauditor[ií]a?\s*(de\s*)?(empresa|cliente)s?\b/i, path: 'auditoria-empresa', method: 'POST' },
+  { intento: 'investigacion_redes', descripcion: 'Investigar competencia y tendencias en redes sociales.', re: /\binvestigaci[oó]n\b|\bcompetencia\b/i, path: 'investigacion-redes-test', method: 'POST' },
+  { intento: 'briefing_web', descripcion: 'Generar un briefing inicial para un proyecto de web nueva.', re: /\bbriefing\b/i, path: 'web-ia-briefing', method: 'POST' },
+  { intento: 'generar_imagen', descripcion: 'Generar la imagen (plantilla HTML/CSS) para el siguiente contenido pendiente de alguna de las 4 marcas.', re: /\bimagen(es)?\b/i, path: 'asset-imagen-prueba', method: 'GET' },
+];
+
+// Clasificador por IA: en vez de exigir que el CEO escriba exactamente la
+// palabra clave, se le pasa el catalogo real de automatizaciones a OpenAI y
+// se le pide que entienda la intencion en lenguaje natural. Si la orden
+// habla de algo que no existe (Stories, Reels, reutilizar publicaciones
+// antiguas...) la IA no debe inventarse una coincidencia -- el prompt se lo
+// deja explicito.
+async function clasificarAutomatizacionesConIA(mensaje) {
+  const catalogo = REGLAS_AUTOMATIZACION_REAL.map((r) => `- ${r.intento}: ${r.descripcion}`).join('\n');
+  const systemPrompt = `Eres el clasificador de ordenes del CEO de una agencia de marketing. Tienes este catalogo de automatizaciones REALES disponibles (y solo estas, ninguna mas):\n${catalogo}\n\nDado el mensaje del CEO, devuelve SOLO un JSON con la forma {"intentos": ["nombre_intento", ...]} listando los intentos del catalogo que la orden pide ejecutar AHORA. Puede haber varios, uno, o ninguno. Si la orden pide algo que no esta en el catalogo (por ejemplo Stories, Reels, reutilizar publicaciones antiguas, o cualquier accion de un departamento sin automatizacion real como ventas/comerciales), NO inventes una coincidencia -- devuelve un array vacio para esa parte. No expliques nada, solo el JSON.`;
+
+  const respuesta = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: mensaje },
+      ],
+    }),
+  });
+
+  if (!respuesta.ok) throw new Error(`OpenAI respondio ${respuesta.status}`);
+  const data = await respuesta.json();
+  const contenido = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+  const parsed = JSON.parse(contenido || '{"intentos":[]}');
+  const validos = new Set(REGLAS_AUTOMATIZACION_REAL.map((r) => r.intento));
+  return (parsed.intentos || []).filter((i) => validos.has(i));
+}
+
+async function dispararAutomatizacionReal(entry) {
+  const texto = entry.message || '';
+  let intentosDetectados;
+  let fuente = 'ia';
+
+  try {
+    intentosDetectados = await clasificarAutomatizacionesConIA(texto);
+  } catch (err) {
+    // Si OpenAI falla (red, clave, etc.) no se cae toda la deteccion --
+    // se cae de vuelta al matching por palabras clave, mas limitado pero
+    // sin dependencias externas.
+    fuente = 'palabras_clave_fallback';
+    intentosDetectados = REGLAS_AUTOMATIZACION_REAL.filter((r) => r.re.test(texto)).map((r) => r.intento);
+  }
+
+  if (!intentosDetectados.length) return null;
+
+  const reglas = REGLAS_AUTOMATIZACION_REAL.filter((r) => intentosDetectados.includes(r.intento));
+  const resultados = [];
+  for (const regla of reglas) {
+    try {
+      const respuesta = await fetch(N8N_BASE + regla.path, { method: regla.method || 'GET' });
+      let cuerpo = null;
+      try { cuerpo = await respuesta.json(); } catch { /* sin cuerpo JSON, no pasa nada */ }
+      resultados.push({ intento: regla.intento, disparado: true, ok: respuesta.ok, statusHttp: respuesta.status, respuesta: cuerpo, deteccion: fuente });
+    } catch (err) {
+      resultados.push({ intento: regla.intento, disparado: true, ok: false, error: String(err && err.message || err), deteccion: fuente });
+    }
+  }
+  return resultados;
+}
+
+async function pushInstruction(payload) {
   const entry = {
     id: nextInstructionId++,
     timestamp: Date.now(),
@@ -899,7 +1139,36 @@ function pushInstruction(payload) {
   });
   const socialExecution = maybeCreateSocialExecution(entry);
   const workExecutions = maybeCreateWorkExecutions(entry);
-  return { instruction: entry, socialExecution: socialExecution || null, workExecutions: workExecutions || [] };
+  const automatizacionReal = await dispararAutomatizacionReal(entry);
+  if (automatizacionReal) {
+    for (const r of automatizacionReal) {
+      pushEvent(`instruction:${entry.target}`, {
+        type: 'automatizacion_real',
+        state: r.ok ? 'disparado' : 'error',
+        task: r.ok
+          ? `n8n confirmo la recepcion de la orden real (${r.intento})`
+          : `n8n no respondio correctamente para ${r.intento}: ${r.error || r.statusHttp}`,
+      });
+    }
+  }
+  // Confirmacion literal e inmediata (real, no simulada): a diferencia de los
+  // "workExecutions" fabricados de mas abajo, este texto es la unica cosa que
+  // el panel puede prometer con certeza absoluta -- que la orden se guardo y,
+  // cuales automatizaciones reales (si alguna) la recibieron. El usuario
+  // pidio explicitamente que el chat del CEO conteste algo literal ("vale",
+  // "si") en vez de quedar en silencio.
+  let respuestaInmediata;
+  if (automatizacionReal && automatizacionReal.length) {
+    const exitosas = automatizacionReal.filter((r) => r.ok).map((r) => r.intento);
+    const fallidas = automatizacionReal.filter((r) => !r.ok);
+    const partes = [];
+    if (exitosas.length) partes.push(`se ha enviado a la automatización real: ${exitosas.join(', ')}`);
+    if (fallidas.length) partes.push(`ha fallado al intentar: ${fallidas.map((r) => r.intento + ' (' + (r.error || 'error ' + r.statusHttp) + ')').join(', ')}`);
+    respuestaInmediata = 'Vale, recibido. La orden ' + partes.join('; y ') + '.';
+  } else {
+    respuestaInmediata = 'Vale, recibido. Esta orden concreta todavía no coincide con ninguna automatización real conectada — queda registrada, pero el trabajo de los equipos de abajo es una simulación visual, no ejecución real.';
+  }
+  return { instruction: entry, socialExecution: socialExecution || null, workExecutions: workExecutions || [], automatizacionReal, respuestaInmediata };
 }
 
 function updateWorkExecution(executionId, action, stepKey = '') {
@@ -1015,6 +1284,21 @@ function inferDepartment(agent) {
   if (/(web|developer|dev|frontend|backend|wordpress|diseño|design)/.test(text)) return 'web';
   if (/(automat|n8n|bot|chatbot|ia|ai|workflow)/.test(text)) return 'automatizacion';
   return 'operaciones';
+}
+
+// /office y /ceo comparten la misma plantilla base (renderOfficeHtml) para no
+// duplicar 900+ lineas de HTML/CSS/JS ya probadas -- cada ruta simplemente
+// recorta, con marcadores HTML (comentarios, seguros dentro de un template
+// literal), la seccion que no le corresponde. /office se queda solo con la
+// cuadricula de agentes; /ceo se queda solo con la consola de ordenes y las
+// metricas, para que la oficina visual quede mas limpia.
+function stripMarkedSection(html, marcador, reemplazo) {
+  const inicio = `<!--${marcador}_INICIO-->`;
+  const fin = `<!--${marcador}_FIN-->`;
+  const i = html.indexOf(inicio);
+  const f = html.indexOf(fin);
+  if (i === -1 || f === -1) return html;
+  return html.slice(0, i) + reemplazo + html.slice(f + fin.length);
 }
 
 function renderOfficeHtml() {
@@ -1251,8 +1535,11 @@ h1{margin:0 0 14px;font-size:clamp(32px,4vw,56px);line-height:.95}
         </div>
       </div>
       <div class="button-row" style="margin-top:14px">
+        <a class="btn-gold" href="/office" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Oficina (agentes)</a>
+        <a class="btn-gold" href="/ceo" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Consola del CEO</a>
         <a class="btn-gold" href="/operations" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Abrir operaciones</a>
         <a class="btn-gold" href="/manual" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Manual operativo</a>
+        <a class="btn-gold" href="/inbox" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Inbox unificado</a>
       </div>
     </div>
     <div class="panel metrics-card">
@@ -1264,6 +1551,7 @@ h1{margin:0 0 14px;font-size:clamp(32px,4vw,56px);line-height:.95}
       </div>
     </div>
   </section>
+  <!--CEO_CONSOLE_INICIO-->
   <section class="metrics-grid">
     <div class="panel metrics-card">
       <h3>Panel de métricas</h3>
@@ -1326,6 +1614,18 @@ h1{margin:0 0 14px;font-size:clamp(32px,4vw,56px);line-height:.95}
       <h3>Últimas instrucciones</h3>
       <div class="instruction-list" id="instruction-list"></div>
     </div>
+    <div class="panel command-card">
+      <h3>Informes diarios (HTML + PDF)</h3>
+      <div class="instruction-list" id="reportes-list"></div>
+    </div>
+    <div class="panel command-card">
+      <h3>Auditorías solicitadas (WhatsApp)</h3>
+      <div class="instruction-list" id="auditorias-list"></div>
+    </div>
+    <div class="panel command-card">
+      <h3>Flyers pendientes de aprobar</h3>
+      <div class="instruction-list" id="flyers-list"></div>
+    </div>
   </section>
   <section class="biz-grid">
     <div class="panel biz-card">
@@ -1355,11 +1655,14 @@ h1{margin:0 0 14px;font-size:clamp(32px,4vw,56px);line-height:.95}
       <div class="command-status" id="metrics-status">Listo para actualizar métricas.</div>
     </div>
   </section>
+  <!--CEO_CONSOLE_FIN-->
+  <!--AGENT_GRID_INICIO-->
   <div class="office-toolbar">
     <div class="office-toolbar-left" id="office-filter"></div>
     <div class="hint">Pulsa un grupo para ver solo ese equipo y hablar más rápido con quien toque.</div>
   </div>
   <section class="office" id="office"></section>
+  <!--AGENT_GRID_FIN-->
   <div class="footer-note">Usa nombres como director_general, cm_vms, ventas_01, seo_lead o web_dev para que la oficina organice mejor a cada agente.</div>
 </div>
 <script>
@@ -1398,6 +1701,23 @@ function eventRow(item){
 }
 function instructionRow(item){
   return '<div class="instruction-line"><strong>'+String(item.author||'CEO')+' → '+String(item.target||'all')+' · '+String(item.scope||'global')+'</strong><span>'+String(item.message||'Sin mensaje')+'</span></div>';
+}
+function reporteRow(item){
+  const enlaces='<a href="/reportes/'+item.id+'.html" target="_blank" style="color:#B8A35A;margin-right:10px">Ver HTML</a>'+(item.tienePdf?'<a href="/reportes/'+item.id+'.pdf" target="_blank" style="color:#B8A35A">Ver / descargar PDF</a>':'<span style="color:#666">Sin PDF</span>');
+  return '<div class="instruction-line"><strong>'+String(item.fecha||'')+'</strong><span>'+String(item.resumen||'Sin resumen')+'</span><div style="margin-top:6px">'+enlaces+'</div></div>';
+}
+function auditoriaRow(item){
+  const a=item.auditoria||{};
+  const fecha=a.fecha?new Date(a.fecha).toLocaleString('es-ES'):'sin fecha';
+  return '<div class="instruction-line"><strong>'+String(a.nombre||item.nombreContacto||'Sin nombre')+' · '+fecha+'</strong><span>Tel: '+String(a.telefono||item.identificador||'-')+' · Email: '+String(a.email||'-')+' · Interes: '+String(a.tipoServicio||'-')+'</span><div style="margin-top:6px"><a href="/inbox" style="color:#B8A35A">Ver conversación en el Inbox</a></div></div>';
+}
+function flyerRow(item){
+  const fecha=item.createdAt?new Date(item.createdAt).toLocaleString('es-ES'):'sin fecha';
+  const estadoTxt={pendiente:'Pendiente',publicado:'Publicado',descartado:'Descartado'}[item.estado]||item.estado;
+  const acciones=item.estado==='pendiente'
+    ?'<div style="margin-top:8px;display:flex;gap:8px"><button class="btn-gold" onclick="aprobarFlyer('+item.id+')" style="padding:8px 14px;font-size:12px">Aprobar y publicar</button><button class="btn-dark" onclick="descartarFlyer('+item.id+')" style="padding:8px 14px;font-size:12px">Descartar</button></div>'
+    :'';
+  return '<div class="instruction-line"><strong>'+String(item.marca||'')+' · '+String(item.formato||'post')+' · '+fecha+'</strong><span>'+estadoTxt+'</span><div style="margin-top:8px;display:flex;gap:12px;align-items:flex-start"><img src="'+String(item.imagenUrl||'')+'" style="width:90px;border-radius:8px;border:1px solid rgba(255,255,255,.1)"><div style="flex:1;font-size:12.5px;color:#ccc;max-height:70px;overflow:hidden">'+String(item.caption||'').slice(0,220)+'</div></div>'+acciones+'</div>';
 }
 function socialExecutionRow(item){
   const badgeClass=String(item.status||'pendiente');
@@ -1542,10 +1862,19 @@ function renderOffice(agents){
   const grouped={};
   for(const zone of ZONES) grouped[zone.key]=[];
   for(const agent of agents){const dep=inferDepartment(agent);if(!grouped[dep]) grouped[dep]=[];grouped[dep].push(agent);}
-  document.getElementById('stat-online').textContent=String(agents.filter(a=>a.state!=='offline').length);
-  document.getElementById('stat-total').textContent=String(agents.length);
-  document.getElementById('stat-working').textContent=String(agents.filter(a=>a.state==='working').length);
+  const statOnline=document.getElementById('stat-online');
+  const statTotal=document.getElementById('stat-total');
+  const statWorking=document.getElementById('stat-working');
+  if(statOnline) statOnline.textContent=String(agents.filter(a=>a.state!=='offline').length);
+  if(statTotal) statTotal.textContent=String(agents.length);
+  if(statWorking) statWorking.textContent=String(agents.filter(a=>a.state==='working').length);
   buildOfficeFilters(grouped);
+  // La pagina /ceo no tiene la cuadricula de agentes (seccion "office"
+  // recortada para dejar la oficina limpia) -- sin este guard, escribir en
+  // un elemento null aqui interrumpia el resto de refreshOffice() y por eso
+  // el panel de metricas y el selector de trabajadores del CEO se quedaban
+  // vacios en /ceo.
+  if(!office) return;
   const visibleZones=(OFFICE_ACTIVE_FILTER==='all')?ZONES:ZONES.filter(zone=>zone.key===OFFICE_ACTIVE_FILTER);
   office.innerHTML=visibleZones.map(zone=>{
     const items=grouped[zone.key]||[];
@@ -1560,12 +1889,18 @@ function renderOffice(agents){
   }).join('');
 }
 function renderTargetPicker(agents){
-  const scope=document.getElementById('scope').value||'global';
+  const scopeEl=document.getElementById('scope');
   const groupSelect=document.getElementById('target-group');
   const grid=document.getElementById('target-grid');
   const target=document.getElementById('target');
   const helper=document.getElementById('target-helper');
-  if(!groupSelect||!grid||!target||!helper) return;
+  // La pagina /office no tiene la Consola del CEO (movida a /ceo para dejar
+  // la oficina limpia) -- sin este guard antes de leer scopeEl.value, esto
+  // lanzaba una excepcion que interrumpia refreshOffice() a mitad de camino
+  // y el catch volvia a pintar la cuadricula de agentes vacia por encima de
+  // la que ya se habia cargado bien.
+  if(!scopeEl||!groupSelect||!grid||!target||!helper) return;
+  const scope=scopeEl.value||'global';
   const grouped={};
   for(const zone of ZONES) grouped[zone.key]=[];
   for(const agent of agents){const dep=inferDepartment(agent);if(!grouped[dep]) grouped[dep]=[];grouped[dep].push(agent);}
@@ -1611,14 +1946,22 @@ function renderReplyCard(execution,kind){
 function renderCommandReply(data){
   const box=document.getElementById('command-reply');
   if(!box) return;
+  const listaAuto=data.automatizacionReal||[];
+  const todasOk=listaAuto.length>0&&listaAuto.every(function(r){return r.ok;});
+  const algunaFallo=listaAuto.some(function(r){return !r.ok;});
+  const ackBorder=algunaFallo?'#c0392b':'#2ecc71';
+  const ackIcon=listaAuto.length?(todasOk?'✅':'⚠️'):'💬';
+  const ackHtml=data.respuestaInmediata
+    ? ('<div class="reply-card" style="border-color:'+ackBorder+'"><div class="reply-card-sub"><strong>'+ackIcon+'</strong> '+data.respuestaInmediata+'</div></div>')
+    : '';
   const executions=[];
   if(data.socialExecution) executions.push({exec:data.socialExecution,kind:'Ejecución de redes'});
   (data.workExecutions||[]).forEach(exec=>executions.push({exec,kind:'Ejecución de equipo'}));
   if(!executions.length){
-    box.innerHTML='<div class="reply-card"><div class="reply-card-sub">Instrucción guardada, pero no coincide con ningún equipo con ejecución activa todavía.</div></div>';
+    box.innerHTML=ackHtml+'<div class="reply-card"><div class="reply-card-sub">Instrucción guardada, pero no coincide con ningún equipo con ejecución activa todavía.</div></div>';
     return;
   }
-  box.innerHTML=executions.map(({exec,kind})=>renderReplyCard(exec,kind)).join('');
+  box.innerHTML=ackHtml+executions.map(({exec,kind})=>renderReplyCard(exec,kind)).join('');
 }
 async function sendInstruction(){
   const scope=document.getElementById('scope').value||'global';
@@ -1689,6 +2032,65 @@ async function refreshSocialExecutions(){
   }catch{
     box.innerHTML='<div class="instruction-line"><span>No se pudieron cargar las ejecuciones de redes.</span></div>';
   }
+}
+async function refreshReportes(){
+  const box=document.getElementById('reportes-list');
+  if(!box) return;
+  try{
+    const response=await fetch('/api/reportes');
+    const data=await response.json();
+    if(!response.ok) throw new Error(data.error||'No autorizado');
+    const list=(data.reportes||[]);
+    box.innerHTML=list.length?list.slice(0,10).map(reporteRow).join(''):'<div class="instruction-line"><span>Todavia no se ha generado ningun informe.</span></div>';
+  }catch{
+    box.innerHTML='<div class="instruction-line"><span>No se pudieron cargar los informes.</span></div>';
+  }
+}
+async function refreshAuditorias(){
+  const box=document.getElementById('auditorias-list');
+  if(!box) return;
+  try{
+    const response=await fetch('/api/inbox');
+    const data=await response.json();
+    if(!response.ok) throw new Error(data.error||'No autorizado');
+    const list=(data.conversaciones||[]).filter(c=>Array.isArray(c.etiquetas)&&c.etiquetas.includes('auditoria-solicitada'));
+    box.innerHTML=list.length?list.slice(0,10).map(auditoriaRow).join(''):'<div class="instruction-line"><span>Todavia no han pedido ninguna auditoria por WhatsApp.</span></div>';
+  }catch{
+    box.innerHTML='<div class="instruction-line"><span>No se pudieron cargar las auditorias.</span></div>';
+  }
+}
+async function refreshFlyers(){
+  const box=document.getElementById('flyers-list');
+  if(!box) return;
+  try{
+    const response=await fetch('/api/flyers');
+    const data=await response.json();
+    if(!response.ok) throw new Error(data.error||'No autorizado');
+    const list=(data.flyers||[]);
+    box.innerHTML=list.length?list.slice(0,10).map(flyerRow).join(''):'<div class="instruction-line"><span>Todavia no hay flyers generados.</span></div>';
+  }catch{
+    box.innerHTML='<div class="instruction-line"><span>No se pudieron cargar los flyers.</span></div>';
+  }
+}
+async function aprobarFlyer(id){
+  const token=(localStorage.getItem('ceo-panel-token')||'').trim();
+  if(!token){ alert('Guarda primero el token privado del CEO.'); return; }
+  try{
+    const response=await fetch('/api/flyers/'+id+'/aprobar',{method:'POST',headers:{'x-ceo-token':token}});
+    const data=await response.json();
+    if(!response.ok) throw new Error(data.error||'No se pudo aprobar');
+    refreshFlyers();
+  }catch(e){ alert('Error: '+(e.message||e)); }
+}
+async function descartarFlyer(id){
+  const token=(localStorage.getItem('ceo-panel-token')||'').trim();
+  if(!token){ alert('Guarda primero el token privado del CEO.'); return; }
+  try{
+    const response=await fetch('/api/flyers/'+id+'/descartar',{method:'POST',headers:{'x-ceo-token':token}});
+    const data=await response.json();
+    if(!response.ok) throw new Error(data.error||'No se pudo descartar');
+    refreshFlyers();
+  }catch(e){ alert('Error: '+(e.message||e)); }
 }
 async function updateSocialExecution(action, stepKey=''){
   const token=(localStorage.getItem('ceo-panel-token')||'').trim();
@@ -1921,7 +2323,13 @@ bindCommandPanel();
 refreshInstructions();
 refreshSocialExecutions();
 refreshWorkExecutions();
+refreshReportes();
+refreshAuditorias();
+refreshFlyers();
 setInterval(refreshOffice,5000);
+setInterval(refreshReportes,30000);
+setInterval(refreshAuditorias,20000);
+setInterval(refreshFlyers,20000);
 setInterval(refreshInstructions,10000);
 setInterval(refreshSocialExecutions,10000);
 setInterval(refreshWorkExecutions,10000);
@@ -2001,6 +2409,7 @@ p,span{color:#b8b8c3;line-height:1.6}
       <p>Aquí vive el taller: ejecuciones sociales, motor general, pasos, responsables y acciones rápidas. La oficina principal se queda limpia y ejecutiva.</p>
       <div class="button-row" style="margin-top:14px">
         <a class="btn-gold" href="/office">Volver a oficina</a>
+        <a class="btn-gold" href="/ceo">Consola del CEO</a>
         <a class="btn-gold" href="/manual">Manual operativo</a>
       </div>
     </div>
@@ -2194,6 +2603,192 @@ function escapeHtml(value) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+function renderInboxHtml() {
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Inbox unificado · Oficina Virtual</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:Inter,Segoe UI,sans-serif;background:linear-gradient(180deg,#0b0b0f 0%,#13131a 100%);color:#f3f3f5}
+.shell{max-width:1320px;margin:0 auto;padding:24px}
+.hero{display:grid;gap:18px;grid-template-columns:1.1fr .9fr}
+.panel{background:rgba(20,20,27,.92);border:1px solid rgba(212,175,55,.20);border-radius:22px;box-shadow:0 20px 60px rgba(0,0,0,.28);padding:20px}
+.eyebrow{color:#d4af37;font-size:12px;text-transform:uppercase;letter-spacing:.18em;margin-bottom:12px}
+h1,h2,h3{margin:0 0 12px}
+h1{font-size:38px;line-height:1.05}
+p,span{color:#b8b8c3;line-height:1.6}
+.button-row{display:flex;gap:10px;flex-wrap:wrap}
+.btn-gold,.btn-dark{padding:12px 16px;border-radius:999px;font-weight:800;text-decoration:none;cursor:pointer;border:none;font-size:13px}
+.btn-gold{background:#d4af37;color:#121216}
+.btn-dark{border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);color:#f4f4f7}
+.token-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+.token-row input{flex:1 1 240px;min-width:0;border:1px solid rgba(255,255,255,.08);background:rgba(10,10,14,.88);color:#f4f4f7;border-radius:14px;padding:12px 14px}
+.filter-row{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}
+.filter-chip{padding:8px 14px;border-radius:999px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);color:#d9dae2;font-size:12px;cursor:pointer}
+.filter-chip.active{background:rgba(212,175,55,.16);border-color:rgba(212,175,55,.4);color:#f0d679}
+.conv-list{display:grid;gap:12px}
+.conv-card{padding:16px 18px;border-radius:18px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06)}
+.conv-top{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
+.conv-canal{display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;margin-right:8px}
+.conv-canal.email{background:rgba(87,199,255,.14);color:#57c7ff}
+.conv-canal.whatsapp{background:rgba(35,209,139,.14);color:#23d18b}
+.conv-canal.instagram{background:rgba(224,85,183,.14);color:#e055b7}
+.conv-canal.web{background:rgba(240,185,79,.14);color:#f0b94f}
+.conv-canal.voz{background:rgba(178,143,255,.14);color:#b28fff}
+.conv-nombre{font-weight:800;font-size:15px}
+.conv-time{font-size:11px;color:#8a8a95}
+.conv-ultimo{margin:10px 0;font-size:13.5px;color:#d9dae2}
+.conv-tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.conv-tag{padding:4px 10px;border-radius:999px;background:rgba(212,175,55,.1);border:1px solid rgba(212,175,55,.25);color:#f0d679;font-size:11px}
+.conv-sug{margin-top:12px;padding:14px;border-radius:14px;background:rgba(35,209,139,.06);border:1px solid rgba(35,209,139,.25)}
+.conv-sug-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#23d18b;font-weight:800;margin-bottom:6px}
+.conv-sug textarea{width:100%;min-height:70px;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(10,10,14,.88);color:#f4f4f7;padding:10px;font-family:inherit;font-size:13px}
+.conv-sug-actions{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.conv-add-tag{display:flex;gap:6px;margin-top:6px}
+.conv-add-tag input{flex:1;border:1px solid rgba(255,255,255,.08);background:rgba(10,10,14,.88);color:#f4f4f7;border-radius:10px;padding:8px 10px;font-size:12px}
+.empty-hint{color:#8a8a95;font-size:13px;padding:20px;text-align:center}
+.command-status{margin-top:10px;font-size:12.5px;color:#b8c7b0}
+@media (max-width:980px){.hero{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="shell">
+  <section class="hero">
+    <div class="panel">
+      <div class="eyebrow">Inbox unificado</div>
+      <h1>Todas las conversaciones, un solo sitio</h1>
+      <p>Email, WhatsApp, Instagram, web y llamadas entran aquí. La IA sugiere una respuesta por conversación — apruébala, edítala o descártala antes de que salga.</p>
+      <div class="button-row" style="margin-top:14px">
+        <a class="btn-gold" href="/office">Oficina</a>
+        <a class="btn-gold" href="/ceo">Consola del CEO</a>
+        <a class="btn-gold" href="/operations">Operaciones</a>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>Token del CEO</h3>
+      <div class="token-row">
+        <input id="ceo-token" placeholder="Token privado del CEO">
+        <button class="btn-dark" id="save-token">Guardar token</button>
+      </div>
+      <div class="command-status" id="global-status">Guarda el token para aprobar/editar/descartar respuestas.</div>
+    </div>
+  </section>
+  <section class="panel" style="margin-top:18px">
+    <h3>Conversaciones</h3>
+    <div class="filter-row" id="filter-row">
+      <div class="filter-chip active" data-canal="todos">Todos</div>
+      <div class="filter-chip" data-canal="email">Email</div>
+      <div class="filter-chip" data-canal="whatsapp">WhatsApp</div>
+      <div class="filter-chip" data-canal="instagram">Instagram</div>
+      <div class="filter-chip" data-canal="web">Web</div>
+      <div class="filter-chip" data-canal="voz">Llamadas</div>
+    </div>
+    <div class="conv-list" id="conv-list"><div class="empty-hint">Cargando...</div></div>
+  </section>
+</div>
+<script>
+const CANAL_LABEL={email:'Email',whatsapp:'WhatsApp',instagram:'Instagram',web:'Web',voz:'Llamada'};
+let filtroActual='todos';
+let ultimaLista=[];
+function getToken(){return (localStorage.getItem('ceo-panel-token')||'').trim();}
+document.getElementById('save-token').addEventListener('click',function(){
+  const val=document.getElementById('ceo-token').value.trim();
+  if(val){localStorage.setItem('ceo-panel-token',val);document.getElementById('global-status').textContent='Token guardado.';refreshInbox();}
+});
+document.getElementById('ceo-token').value=getToken();
+function timeAgo(ts){
+  const diff=Math.max(0,Date.now()-ts);
+  const min=Math.floor(diff/60000);
+  if(min<1) return 'ahora';
+  if(min<60) return min+'min';
+  const h=Math.floor(min/60);
+  if(h<24) return h+'h';
+  return Math.floor(h/24)+'d';
+}
+function convCard(c){
+  const canal=c.canal||'web';
+  const label=CANAL_LABEL[canal]||canal;
+  const ultimo=c.ultimoMensaje?c.ultimoMensaje.texto:'(sin mensajes)';
+  const tags=(c.etiquetas||[]).map(function(t){return '<span class="conv-tag">'+t+'</span>';}).join('');
+  let sugHtml='';
+  if(c.sugerenciaIA){
+    sugHtml='<div class="conv-sug"><div class="conv-sug-label">Sugerencia de la IA</div>'+
+      '<textarea id="sug-'+c.id+'">'+c.sugerenciaIA+'</textarea>'+
+      '<div class="conv-sug-actions">'+
+      '<button class="btn-gold" onclick="responder('+c.id+',\\'aprobar\\')">Aprobar y enviar</button>'+
+      '<button class="btn-dark" onclick="responder('+c.id+',\\'editar\\')">Enviar editado</button>'+
+      '<button class="btn-dark" onclick="responder('+c.id+',\\'descartar\\')">Descartar</button>'+
+      '</div></div>';
+  }
+  return '<div class="conv-card">'+
+    '<div class="conv-top"><div><span class="conv-canal '+canal+'">'+label+'</span><span class="conv-nombre">'+(c.nombreContacto||c.identificador)+'</span></div>'+
+    '<span class="conv-time">'+timeAgo(c.updatedAt)+'</span></div>'+
+    '<div class="conv-tags">'+tags+'</div>'+
+    '<div class="conv-ultimo">'+ultimo+'</div>'+
+    sugHtml+
+    '<div class="conv-add-tag"><input id="tag-input-'+c.id+'" placeholder="Añadir etiqueta CRM..."><button class="btn-dark" onclick="anadirEtiqueta('+c.id+')">+</button></div>'+
+    '</div>';
+}
+function renderLista(){
+  const box=document.getElementById('conv-list');
+  const filtradas=filtroActual==='todos'?ultimaLista:ultimaLista.filter(function(c){return c.canal===filtroActual;});
+  box.innerHTML=filtradas.length?filtradas.map(convCard).join(''):'<div class="empty-hint">Sin conversaciones todavia en este canal.</div>';
+}
+async function refreshInbox(){
+  try{
+    const response=await fetch('/api/inbox');
+    const data=await response.json();
+    if(!response.ok) throw new Error(data.error||'No autorizado');
+    ultimaLista=data.conversaciones||[];
+    renderLista();
+  }catch(e){
+    document.getElementById('conv-list').innerHTML='<div class="empty-hint">No se pudo cargar el inbox.</div>';
+  }
+}
+async function anadirEtiqueta(id){
+  const token=getToken();
+  if(!token){document.getElementById('global-status').textContent='Guarda el token del CEO primero.';return;}
+  const input=document.getElementById('tag-input-'+id);
+  const etiqueta=(input.value||'').trim();
+  if(!etiqueta) return;
+  await fetch('/api/inbox/'+id+'/etiquetas',{method:'POST',headers:{'Content-Type':'application/json','x-ceo-token':token},body:JSON.stringify({etiqueta:etiqueta})});
+  input.value='';
+  refreshInbox();
+}
+async function responder(id,accion){
+  const token=getToken();
+  if(!token){document.getElementById('global-status').textContent='Guarda el token del CEO primero.';return;}
+  const textarea=document.getElementById('sug-'+id);
+  const texto=textarea?textarea.value:'';
+  document.getElementById('global-status').textContent='Enviando...';
+  try{
+    const response=await fetch('/api/inbox/'+id+'/respuesta',{method:'POST',headers:{'Content-Type':'application/json','x-ceo-token':token},body:JSON.stringify({accion:accion,texto:texto})});
+    const data=await response.json();
+    if(!response.ok) throw new Error(data.error||'Error al enviar');
+    document.getElementById('global-status').textContent=accion==='descartar'?'Sugerencia descartada.':'Respuesta enviada.';
+    refreshInbox();
+  }catch(e){
+    document.getElementById('global-status').textContent='Error: '+e.message;
+  }
+}
+document.getElementById('filter-row').addEventListener('click',function(e){
+  const chip=e.target.closest('.filter-chip');
+  if(!chip) return;
+  document.querySelectorAll('.filter-chip').forEach(function(el){el.classList.remove('active');});
+  chip.classList.add('active');
+  filtroActual=chip.getAttribute('data-canal');
+  renderLista();
+});
+refreshInbox();
+setInterval(refreshInbox,15000);
+</script>
+</body>
+</html>`;
 }
 
 function renderManualHtml() {
@@ -2575,7 +3170,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'GET' && (url.pathname === '/office' || url.pathname === '/operations' || url.pathname === '/manual')) {
+  if (req.method === 'GET' && (url.pathname === '/office' || url.pathname === '/ceo' || url.pathname === '/operations' || url.pathname === '/manual' || url.pathname === '/inbox')) {
     if (!isLoggedIn(req)) {
       res.writeHead(302, { Location: '/login' });
       res.end();
@@ -2585,7 +3180,13 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/office') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(renderOfficeHtml());
+    res.end(stripMarkedSection(renderOfficeHtml(), 'CEO_CONSOLE', '<section class="metrics-grid"><div class="panel metrics-card"><h3>Consola del CEO</h3><div class="events-list"><div class="event-line"><strong>Movida a su propia página</strong><span>Da órdenes de trabajo y controla las métricas desde la Consola del CEO, separada para que la oficina se vea limpia.</span></div></div><div class="button-row" style="margin-top:14px"><a class="btn-gold" href="/ceo" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Abrir Consola del CEO</a></div></div></section>'));
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/ceo') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(stripMarkedSection(renderOfficeHtml(), 'AGENT_GRID', ''));
     return;
   }
 
@@ -2598,6 +3199,12 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/manual') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(renderManualHtml());
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/inbox') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(renderInboxHtml());
     return;
   }
 
@@ -2657,6 +3264,330 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     json(res, 200, { workExecutions: publicWorkExecutions() });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/reportes') {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    json(res, 200, { reportes: reportes.slice(-60).reverse() });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/reportes') {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      if (!payload.fecha || !payload.html) {
+        json(res, 400, { error: 'Missing required fields: fecha, html' });
+        return;
+      }
+      fs.mkdirSync(reportesDir, { recursive: true });
+      const id = nextReporteId++;
+      fs.writeFileSync(path.join(reportesDir, id + '.html'), String(payload.html));
+      let tienePdf = false;
+      if (payload.pdf_b64) {
+        fs.writeFileSync(path.join(reportesDir, id + '.pdf'), Buffer.from(String(payload.pdf_b64), 'base64'));
+        tienePdf = true;
+      }
+      const registro = {
+        id,
+        fecha: String(payload.fecha),
+        resumen: truncate(String(payload.resumen || ''), 400),
+        tienePdf,
+        createdAt: Date.now(),
+      };
+      reportes.push(registro);
+      saveState();
+      json(res, 200, { ok: true, reporte: registro });
+    } catch (error) {
+      json(res, 400, { error: 'Invalid body: ' + (error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && /^\/reportes\/\d+\.(html|pdf)$/.test(url.pathname)) {
+    if (!isLoggedIn(req)) {
+      res.writeHead(302, { Location: '/login' });
+      res.end();
+      return;
+    }
+    const match = url.pathname.match(/^\/reportes\/(\d+)\.(html|pdf)$/);
+    const id = match[1];
+    const ext = match[2];
+    const filePath = path.join(reportesDir, id + '.' + ext);
+    if (!fs.existsSync(filePath)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Informe no encontrado');
+      return;
+    }
+    const registro = reportes.find((r) => String(r.id) === String(id));
+    const nombre = 'informe-' + (registro ? registro.fecha.replace(/[^\d]/g, '-') : id) + '.' + ext;
+    res.writeHead(200, {
+      'Content-Type': ext === 'pdf' ? 'application/pdf' : 'text/html; charset=utf-8',
+      'Content-Disposition': `inline; filename="${nombre}"`,
+    });
+    res.end(fs.readFileSync(filePath));
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/inbox') {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    json(res, 200, { conversaciones: publicConversaciones() });
+    return;
+  }
+
+  if (req.method === 'GET' && /^\/api\/inbox\/\d+$/.test(url.pathname)) {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const id = Number(url.pathname.split('/').pop());
+    const conv = conversaciones.find((c) => c.id === id);
+    if (!conv) { json(res, 404, { error: 'No encontrada' }); return; }
+    json(res, 200, { conversacion: conv });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/inbox/mensaje') {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      const conv = agregarMensajeInbox(payload);
+      json(res, 200, { ok: true, conversacion: conv });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && /^\/api\/inbox\/\d+\/etiquetas$/.test(url.pathname)) {
+    if (!isAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const id = Number(url.pathname.split('/')[3]);
+    const conv = conversaciones.find((c) => c.id === id);
+    if (!conv) { json(res, 404, { error: 'No encontrada' }); return; }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      if (payload.accion === 'quitar') {
+        conv.etiquetas = conv.etiquetas.filter((e) => e !== payload.etiqueta);
+      } else if (payload.etiqueta) {
+        const limpia = sanitizeSpanishText(String(payload.etiqueta)).slice(0, 40);
+        if (!conv.etiquetas.includes(limpia)) conv.etiquetas.push(limpia);
+      }
+      saveState();
+      json(res, 200, { ok: true, conversacion: conv });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && /^\/api\/inbox\/\d+\/auditoria$/.test(url.pathname)) {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const id = Number(url.pathname.split('/')[3]);
+    const conv = conversaciones.find((c) => c.id === id);
+    if (!conv) { json(res, 404, { error: 'No encontrada' }); return; }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      conv.auditoria = {
+        nombre: sanitizeSpanishText(String(payload.nombre || '')).slice(0, 120),
+        telefono: String(payload.telefono || '').slice(0, 40),
+        email: String(payload.email || '').slice(0, 160),
+        tipoServicio: sanitizeSpanishText(String(payload.tipoServicio || '')).slice(0, 200),
+        fecha: Date.now(),
+      };
+      if (!conv.etiquetas.includes('auditoria-solicitada')) conv.etiquetas.push('auditoria-solicitada');
+      conv.updatedAt = Date.now();
+      saveState();
+      json(res, 200, { ok: true, conversacion: conv });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/calendario') {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      if (!payload.fecha || !payload.marca || !Array.isArray(payload.formatos)) {
+        json(res, 400, { error: 'faltan campos: fecha, marca, formatos[]' });
+        return;
+      }
+      const formatosValidos = payload.formatos.filter((f) => ['reel', 'feed', 'story'].includes(f));
+      const entrada = {
+        id: nextCalendarioId++,
+        fecha: String(payload.fecha).slice(0, 10),
+        marca: String(payload.marca).slice(0, 60),
+        formatos: formatosValidos,
+        mejorHora: String(payload.mejorHora || '').slice(0, 100),
+        resumen: sanitizeSpanishText(String(payload.resumen || '')).slice(0, 1000),
+        createdAt: Date.now(),
+      };
+      const idx = calendario.findIndex((c) => c.fecha === entrada.fecha);
+      if (idx >= 0) calendario[idx] = entrada; else calendario.unshift(entrada);
+      if (calendario.length > 120) calendario.length = 120;
+      saveState();
+      json(res, 200, { ok: true, entrada });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/calendario') {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    json(res, 200, { calendario });
+    return;
+  }
+
+  if (req.method === 'GET' && /^\/api\/calendario\/[\w-]+$/.test(url.pathname)) {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const fechaParam = decodeURIComponent(url.pathname.split('/')[3]);
+    const fecha = fechaParam === 'hoy'
+      ? new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' })
+      : fechaParam;
+    const entrada = calendario.find((c) => c.fecha === fecha) || null;
+    json(res, 200, { fecha, entrada });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/flyers') {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      if (!payload.marca || !payload.imagenUrl || !payload.caption) {
+        json(res, 400, { error: 'faltan campos: marca, imagenUrl, caption' });
+        return;
+      }
+      const flyer = {
+        id: nextFlyerId++,
+        marca: String(payload.marca).slice(0, 60),
+        formato: payload.formato === 'story' ? 'story' : 'post',
+        imagenUrl: String(payload.imagenUrl).slice(0, 500),
+        caption: sanitizeSpanishText(String(payload.caption)).slice(0, 2200),
+        estado: 'pendiente',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      flyers.unshift(flyer);
+      if (flyers.length > 300) flyers.length = 300;
+      saveState();
+      json(res, 200, { ok: true, flyer });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/flyers') {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    json(res, 200, { flyers });
+    return;
+  }
+
+  if (req.method === 'POST' && /^\/api\/flyers\/\d+\/aprobar$/.test(url.pathname)) {
+    if (!isAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const id = Number(url.pathname.split('/')[3]);
+    const flyer = flyers.find((f) => f.id === id);
+    if (!flyer) { json(res, 404, { error: 'No encontrado' }); return; }
+    if (flyer.estado !== 'pendiente') { json(res, 409, { error: 'Ya procesado' }); return; }
+    try {
+      await publicarFlyerInstagram(flyer);
+      flyer.estado = 'publicado';
+      flyer.updatedAt = Date.now();
+      saveState();
+      json(res, 200, { ok: true, flyer });
+    } catch (error) {
+      json(res, 502, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && /^\/api\/flyers\/\d+\/descartar$/.test(url.pathname)) {
+    if (!isAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const id = Number(url.pathname.split('/')[3]);
+    const flyer = flyers.find((f) => f.id === id);
+    if (!flyer) { json(res, 404, { error: 'No encontrado' }); return; }
+    flyer.estado = 'descartado';
+    flyer.updatedAt = Date.now();
+    saveState();
+    json(res, 200, { ok: true, flyer });
+    return;
+  }
+
+  if (req.method === 'POST' && /^\/api\/inbox\/\d+\/respuesta$/.test(url.pathname)) {
+    if (!isAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const id = Number(url.pathname.split('/')[3]);
+    const conv = conversaciones.find((c) => c.id === id);
+    if (!conv) { json(res, 404, { error: 'No encontrada' }); return; }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      if (payload.accion === 'descartar') {
+        conv.sugerenciaIA = null;
+        saveState();
+        json(res, 200, { ok: true, conversacion: conv });
+        return;
+      }
+      const texto = String(payload.texto || conv.sugerenciaIA || '').trim();
+      if (!texto) { json(res, 400, { error: 'Sin texto que enviar' }); return; }
+      await enviarRespuestaInbox(conv, texto);
+      conv.mensajes.push({ id: nextMensajeId++, autor: 'sistema', texto, timestamp: Date.now() });
+      conv.sugerenciaIA = null;
+      conv.updatedAt = Date.now();
+      saveState();
+      json(res, 200, { ok: true, conversacion: conv });
+    } catch (error) {
+      json(res, 502, { error: String(error.message || error) });
+    }
     return;
   }
 
@@ -2748,9 +3679,9 @@ const server = http.createServer(async (req, res) => {
         json(res, 400, { error: 'Missing required field: message' });
         return;
       }
-      const result = pushInstruction(payload);
+      const result = await pushInstruction(payload);
       broadcastAgents();
-      json(res, 200, { ok: true, instruction: result.instruction, socialExecution: result.socialExecution, workExecutions: result.workExecutions });
+      json(res, 200, { ok: true, instruction: result.instruction, socialExecution: result.socialExecution, workExecutions: result.workExecutions, automatizacionReal: result.automatizacionReal, respuestaInmediata: result.respuestaInmediata });
     } catch {
       json(res, 400, { error: 'Invalid JSON body' });
     }
