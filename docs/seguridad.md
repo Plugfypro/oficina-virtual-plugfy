@@ -38,13 +38,10 @@ reiniciar el contenedor).
 
 ## El token de heartbeat
 
-`POST /api/heartbeat` y `POST /api/agents/remove` exigen la cabecera
-`X-Heartbeat-Token` con el valor de `HEARTBEAT_TOKEN`. Sin esto, cualquiera en
-internet podría escribir o borrar datos del panel — por eso es obligatorio,
-no opcional. Cada automatización que reporte estado real (n8n, un script, lo
-que sea) debe mandar esa cabecera. Si tras un cambio de token tus
-automatizaciones dejan de reportar, revisa que también se haya actualizado
-ahí, no solo en `.env` del panel.
+`POST /api/heartbeat` exige la cabecera `X-Heartbeat-Token` con el valor de
+`HEARTBEAT_TOKEN`. `POST /api/agents/remove` es una acción administrativa y
+exige `X-CEO-Token`. Cada automatización que reporte estado real (n8n, un
+script, lo que sea) debe mandar la cabecera de heartbeat.
 
 Hay además un límite de intentos fallidos por IP (5 fallos → bloqueo de 30
 minutos) en los endpoints protegidos por token, para frenar intentos de
@@ -61,10 +58,10 @@ La contraseña se guarda solo como hash (scrypt), nunca en texto plano — no la
 reutilices de otro sistema (SSH, hosting, etc.): si el panel se viera
 comprometido alguna vez, esa contraseña no debe abrir nada más.
 
-Los únicos endpoints de solo lectura que siguen siendo públicos por diseño son
-`/api/info` y `/api/metrics` (pensados para mostrarse sin login, ej. en un
-embed). Si tu información de negocio es sensible, no expongas ni siquiera esos
-a internet sin un proxy con autenticación adicional delante.
+`/api/info`, `/api/metrics`, `/api/agents`, `/api/events`, `/api/reportes` y
+`/api/inbox` exigen una sesión iniciada o el token de heartbeat para llamadas
+servidor a servidor. `/api/business-metrics` sigue siendo público para el
+widget opcional de WordPress; no lo expongas si esas cifras son sensibles.
 
 ## Antes de cada `git push`
 

@@ -11,6 +11,7 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL}
       ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH}
       DATA_FILE: ${DATA_FILE:-/app/data/state.json}
+      SESSIONS_FILE: ${SESSIONS_FILE:-/app/data/sessions.json}
       PUBLIC_OFFICE_URL: ${PUBLIC_OFFICE_URL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       N8N_INBOX_WEBHOOK_URL: ${N8N_INBOX_WEBHOOK_URL:-}

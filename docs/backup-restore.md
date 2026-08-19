@@ -2,12 +2,13 @@
 
 ## Qué hay que respaldar
 
-Todo el estado real vive en dos sitios:
+El estado real vive en estos archivos:
 
 1. **`data/state.json`** — agentes, instrucciones, ejecuciones, métricas de
    negocio. Se reescribe en cada cambio.
-2. **`config/mission-data.json`** — tu equipo real (si lo has configurado).
-3. **`data/admin.json`** — solo existe si creaste tu usuario desde `/setup`
+2. **`data/sessions.json`** — sesiones activas del panel, separadas del estado.
+3. **`config/mission-data.json`** — tu equipo real (si lo has configurado).
+4. **`data/admin.json`** — solo existe si creaste tu usuario desde `/setup`
    (en vez de por variables de entorno). Guarda el email y el hash de la
    contraseña del único admin — sin este archivo (y sin `ADMIN_EMAIL`/
    `ADMIN_PASSWORD_HASH` en `.env`), perderías el acceso y tendrías que volver

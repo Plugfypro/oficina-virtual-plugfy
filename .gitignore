@@ -2,11 +2,13 @@
 .env.local
 docker-compose.yml
 data/
+data-staging/
 *.local
 node_modules/
 state.json*
 *.backup
 *.backup-*
+server.js.bak-*
 graphify-out/
 
 # Datos reales de la empresa — el repo publico solo trae el ejemplo generico
@@ -33,4 +35,3 @@ config/catalogo-precios.json
 # OpenAI hardcodeada (mismo patron que el workflow original en produccion),
 # nunca deben subirse al repo publico.
 knowledge/n8n-workflows-backup/
-

@@ -1,0 +1,23 @@
+services:
+  miniverse-office-staging:
+    build: .
+    container_name: miniverse-office-staging
+    restart: unless-stopped
+    environment:
+      PORT: 4321
+      OFFLINE_TIMEOUT_MS: ${STAGING_OFFLINE_TIMEOUT_MS:-900000}
+      CEO_PANEL_TOKEN: ${STAGING_CEO_PANEL_TOKEN:-staging-only-change-me}
+      HEARTBEAT_TOKEN: ${STAGING_HEARTBEAT_TOKEN:-staging-only-change-me}
+      ADMIN_EMAIL: ${STAGING_ADMIN_EMAIL:-}
+      ADMIN_PASSWORD_HASH: ${STAGING_ADMIN_PASSWORD_HASH:-}
+      DATA_FILE: /app/data/state.json
+      SESSIONS_FILE: /app/data/sessions.json
+      PUBLIC_OFFICE_URL: http://127.0.0.1:4323
+      OPENAI_API_KEY: ${STAGING_OPENAI_API_KEY:-}
+    ports:
+      - "127.0.0.1:4323:4321"
+    volumes:
+      - ./data-staging:/app/data
+    mem_limit: 512m
+    cpus: 0.50
+

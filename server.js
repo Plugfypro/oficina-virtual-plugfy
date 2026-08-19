@@ -24,6 +24,7 @@ function verifyPassword(password, storedHash) {
 function createSession() {
   const id = crypto.randomBytes(32).toString('hex');
   sessions.set(id, { expiresAt: Date.now() + SESSION_TTL_MS });
+  saveSessions();
   return id;
 }
 
@@ -122,7 +123,7 @@ function renderSetupHtml(error) {
     <button type="button" class="pwd-toggle" onclick="const p=document.getElementById('pwd');p.type=p.type==='password'?'text':'password';this.textContent=p.type==='password'?'👁':'🙈';">👁</button>
   </div>
   <button type="submit">Crear acceso</button>
-  ${error ? '<div class="error">' + error + '</div>' : ''}
+  ${error ? '<div class="error">' + escapeHtml(error) + '</div>' : ''}
 </form>
 </body></html>`;
 }
@@ -153,8 +154,7 @@ function isAdminConfigured() {
 }
 
 function saveAdminToFile(email, passwordHash) {
-  fs.mkdirSync(path.dirname(adminFile), { recursive: true });
-  fs.writeFileSync(adminFile, JSON.stringify({ email, passwordHash }, null, 2));
+  writeJsonAtomic(adminFile, { email, passwordHash });
   adminEmail = email;
   adminPasswordHash = passwordHash;
 }
@@ -171,6 +171,7 @@ function hashPasswordForStorage(password) {
 const publicOfficeUrl = String(process.env.PUBLIC_OFFICE_URL || '').replace(/\/$/, '');
 
 const agents = new Map();
+const VALID_AGENT_STATES = new Set(['working', 'idle', 'thinking', 'speaking', 'sleeping', 'error', 'offline', 'collaborating', 'waiting', 'listening']);
 const events = [];
 const instructions = [];
 const socialExecutions = [];
@@ -269,12 +270,58 @@ function ensureDataDir() {
   fs.mkdirSync(dir, { recursive: true });
 }
 
+// Escritura atomica (archivo temporal + rename) -- evita que un reinicio a
+// mitad de un fs.writeFileSync deje el JSON truncado y loadState() reviente
+// al leerlo la proxima vez.
+function writeJsonAtomic(file, value) {
+  const dir = path.dirname(file);
+  fs.mkdirSync(dir, { recursive: true });
+  const tempFile = path.join(dir, `.${path.basename(file)}.${process.pid}.tmp`);
+  fs.writeFileSync(tempFile, JSON.stringify(value, null, 2), 'utf8');
+  fs.renameSync(tempFile, file);
+}
+
+// Archivo propio y separado de state.json a proposito: state.json guarda una
+// foto completa de agentes/instrucciones/etc. en cada saveState(), y si el
+// guardado de sesiones se metiera ahi dentro, un login en mal momento podria
+// sobrescribir esa foto completa (y perder agentes) en el siguiente reinicio.
+// Este archivo solo contiene sesiones -- nunca puede tocar ni borrar datos.
+const sessionsFile = String(process.env.SESSIONS_FILE || '/app/data/sessions.json');
+
+function loadSessions() {
+  try {
+    if (!fs.existsSync(sessionsFile)) return;
+    const raw = fs.readFileSync(sessionsFile, 'utf8');
+    const parsed = JSON.parse(raw || '{}');
+    if (!parsed || typeof parsed !== 'object') return;
+    const now = Date.now();
+    for (const [id, session] of Object.entries(parsed)) {
+      if (session && typeof session.expiresAt === 'number' && session.expiresAt > now) {
+        sessions.set(id, session);
+      }
+    }
+  } catch (error) {
+    console.error('No se pudieron cargar las sesiones:', error.message || error);
+  }
+}
+
+function saveSessions() {
+  try {
+    writeJsonAtomic(sessionsFile, Object.fromEntries(sessions));
+  } catch (error) {
+    console.error('No se pudieron guardar las sesiones:', error.message || error);
+  }
+}
+
 function loadState() {
   try {
     ensureDataDir();
     if (!fs.existsSync(dataFile)) return;
     const raw = fs.readFileSync(dataFile, 'utf8');
     const parsed = JSON.parse(raw || '{}');
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.agents)) {
+      throw new Error('state.json no contiene un agents[] valido');
+    }
     if (Array.isArray(parsed.instructions)) {
       instructions.splice(0, instructions.length, ...parsed.instructions);
       nextInstructionId = (instructions.at(-1)?.id || 0) + 1;
@@ -315,14 +362,18 @@ function loadState() {
       Object.assign(businessMetrics, parsed.businessMetrics);
     }
   } catch (error) {
+    stateLoadFailed = true;
     console.error('No se pudo cargar el estado:', error.message || error);
   }
 }
 
+let stateLoadFailed = false;
 function saveState() {
+  if (stateLoadFailed) {
+    throw new Error('Guardado bloqueado: state.json no se pudo cargar de forma segura');
+  }
   try {
-    ensureDataDir();
-    fs.writeFileSync(dataFile, JSON.stringify({
+    writeJsonAtomic(dataFile, {
       agents: publicAgents(),
       instructions,
       socialExecutions,
@@ -332,9 +383,10 @@ function saveState() {
       flyers,
       calendario,
       businessMetrics,
-    }, null, 2), 'utf8');
+    });
   } catch (error) {
     console.error('No se pudo guardar el estado:', error.message || error);
+    throw error;
   }
 }
 
@@ -397,7 +449,7 @@ function heartbeat(payload) {
     agent: payload.agent,
     id: payload.agent,
     name: sanitizeSpanishText(payload.name || existing.name || payload.agent),
-    state: payload.state || existing.state || 'idle',
+    state: VALID_AGENT_STATES.has(String(payload.state)) ? String(payload.state) : (existing.state || 'idle'),
     task: payload.task !== undefined ? sanitizeSpanishText(payload.task) : (existing.task || null),
     energy: payload.energy ?? existing.energy ?? 1,
     metadata: sanitizeDeep(payload.metadata || existing.metadata || {}),
@@ -477,6 +529,7 @@ async function enviarRespuestaInbox(conv, texto) {
   if (!N8N_INBOX_WEBHOOK_URL) throw new Error('N8N_INBOX_WEBHOOK_URL no configurado');
   const resp = await fetch(N8N_INBOX_WEBHOOK_URL, {
     method: 'POST',
+    signal: AbortSignal.timeout(30000),
     headers: { 'Content-Type': 'application/json', 'X-Inbox-Token': N8N_INBOX_TOKEN },
     body: JSON.stringify({
       conversacionId: conv.id,
@@ -500,6 +553,7 @@ async function publicarFlyerInstagram(flyer) {
   if (!N8N_FLYER_PUBLICAR_URL) throw new Error('N8N_FLYER_PUBLICAR_URL no configurado');
   const resp = await fetch(N8N_FLYER_PUBLICAR_URL, {
     method: 'POST',
+    signal: AbortSignal.timeout(60000),
     headers: { 'Content-Type': 'application/json', 'X-Inbox-Token': N8N_INBOX_TOKEN },
     body: JSON.stringify({
       marca: flyer.marca,
@@ -1008,7 +1062,10 @@ function setBusinessMetrics(payload = {}) {
       if (Number.isFinite(value)) businessMetrics[field] = value;
     }
   }
-  if (payload.n8n_status !== undefined) businessMetrics.n8n_status = String(payload.n8n_status || 'ok');
+  if (payload.n8n_status !== undefined) {
+    const status = String(payload.n8n_status || 'ok');
+    businessMetrics.n8n_status = ['ok', 'warn', 'error'].includes(status) ? status : 'warn';
+  }
   if (payload.notes !== undefined) businessMetrics.notes = truncate(String(payload.notes || ''), 500);
   businessMetrics.updatedAt = Date.now();
   saveState();
@@ -1068,6 +1125,7 @@ async function clasificarAutomatizacionesConIA(mensaje) {
 
   const respuesta = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
+    signal: AbortSignal.timeout(30000),
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
     body: JSON.stringify({
       model: 'gpt-4o-mini',
@@ -1109,7 +1167,7 @@ async function dispararAutomatizacionReal(entry) {
   const resultados = [];
   for (const regla of reglas) {
     try {
-      const respuesta = await fetch(N8N_BASE + regla.path, { method: regla.method || 'GET' });
+      const respuesta = await fetch(N8N_BASE + regla.path, { method: regla.method || 'GET', signal: AbortSignal.timeout(30000) });
       let cuerpo = null;
       try { cuerpo = await respuesta.json(); } catch { /* sin cuerpo JSON, no pasa nada */ }
       resultados.push({ intento: regla.intento, disparado: true, ok: respuesta.ok, statusHttp: respuesta.status, respuesta: cuerpo, deteccion: fuente });
@@ -1540,6 +1598,7 @@ h1{margin:0 0 14px;font-size:clamp(32px,4vw,56px);line-height:.95}
         <a class="btn-gold" href="/operations" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Abrir operaciones</a>
         <a class="btn-gold" href="/manual" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Manual operativo</a>
         <a class="btn-gold" href="/inbox" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Inbox unificado</a>
+        <a class="btn-dark" href="/logout" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Cerrar sesión</a>
       </div>
     </div>
     <div class="panel metrics-card">
@@ -1666,6 +1725,13 @@ h1{margin:0 0 14px;font-size:clamp(32px,4vw,56px);line-height:.95}
   <div class="footer-note">Usa nombres como director_general, cm_vms, ventas_01, seo_lead o web_dev para que la oficina organice mejor a cada agente.</div>
 </div>
 <script>
+function escapeHtml(value){
+  return String(value??'')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
 const ZONES=[
   {key:'direccion',title:'Dirección',tag:'CEO / Control'},
   {key:'community',title:'Community & Redes',tag:'Contenido'},
@@ -1697,42 +1763,42 @@ function eventRow(item){
   const type=item.action.type||'evento';
   const state=item.action.state||'';
   const task=item.action.task||'Sin detalle';
-  return '<div class="event-line"><strong>'+String(item.agentId||'agente')+' · '+type+(state?' · '+state:'')+'</strong><span>'+task+'</span></div>';
+  return '<div class="event-line"><strong>'+escapeHtml(item.agentId||'agente')+' · '+escapeHtml(type)+(state?' · '+escapeHtml(state):'')+'</strong><span>'+escapeHtml(task)+'</span></div>';
 }
 function instructionRow(item){
-  return '<div class="instruction-line"><strong>'+String(item.author||'CEO')+' → '+String(item.target||'all')+' · '+String(item.scope||'global')+'</strong><span>'+String(item.message||'Sin mensaje')+'</span></div>';
+  return '<div class="instruction-line"><strong>'+escapeHtml(item.author||'CEO')+' → '+escapeHtml(item.target||'all')+' · '+escapeHtml(item.scope||'global')+'</strong><span>'+escapeHtml(item.message||'Sin mensaje')+'</span></div>';
 }
 function reporteRow(item){
-  const enlaces='<a href="/reportes/'+item.id+'.html" target="_blank" style="color:#B8A35A;margin-right:10px">Ver HTML</a>'+(item.tienePdf?'<a href="/reportes/'+item.id+'.pdf" target="_blank" style="color:#B8A35A">Ver / descargar PDF</a>':'<span style="color:#666">Sin PDF</span>');
-  return '<div class="instruction-line"><strong>'+String(item.fecha||'')+'</strong><span>'+String(item.resumen||'Sin resumen')+'</span><div style="margin-top:6px">'+enlaces+'</div></div>';
+  const enlaces='<a href="/reportes/'+encodeURIComponent(item.id)+'.html" target="_blank" style="color:#B8A35A;margin-right:10px">Ver HTML</a>'+(item.tienePdf?'<a href="/reportes/'+encodeURIComponent(item.id)+'.pdf" target="_blank" style="color:#B8A35A">Ver / descargar PDF</a>':'<span style="color:#666">Sin PDF</span>');
+  return '<div class="instruction-line"><strong>'+escapeHtml(item.fecha||'')+'</strong><span>'+escapeHtml(item.resumen||'Sin resumen')+'</span><div style="margin-top:6px">'+enlaces+'</div></div>';
 }
 function auditoriaRow(item){
   const a=item.auditoria||{};
   const fecha=a.fecha?new Date(a.fecha).toLocaleString('es-ES'):'sin fecha';
-  return '<div class="instruction-line"><strong>'+String(a.nombre||item.nombreContacto||'Sin nombre')+' · '+fecha+'</strong><span>Tel: '+String(a.telefono||item.identificador||'-')+' · Email: '+String(a.email||'-')+' · Interes: '+String(a.tipoServicio||'-')+'</span><div style="margin-top:6px"><a href="/inbox" style="color:#B8A35A">Ver conversación en el Inbox</a></div></div>';
+  return '<div class="instruction-line"><strong>'+escapeHtml(a.nombre||item.nombreContacto||'Sin nombre')+' · '+escapeHtml(fecha)+'</strong><span>Tel: '+escapeHtml(a.telefono||item.identificador||'-')+' · Email: '+escapeHtml(a.email||'-')+' · Interes: '+escapeHtml(a.tipoServicio||'-')+'</span><div style="margin-top:6px"><a href="/inbox" style="color:#B8A35A">Ver conversación en el Inbox</a></div></div>';
 }
 function flyerRow(item){
   const fecha=item.createdAt?new Date(item.createdAt).toLocaleString('es-ES'):'sin fecha';
   const estadoTxt={pendiente:'Pendiente',publicado:'Publicado',descartado:'Descartado'}[item.estado]||item.estado;
   const acciones=item.estado==='pendiente'
-    ?'<div style="margin-top:8px;display:flex;gap:8px"><button class="btn-gold" onclick="aprobarFlyer('+item.id+')" style="padding:8px 14px;font-size:12px">Aprobar y publicar</button><button class="btn-dark" onclick="descartarFlyer('+item.id+')" style="padding:8px 14px;font-size:12px">Descartar</button></div>'
+    ?'<div style="margin-top:8px;display:flex;gap:8px"><button class="btn-gold" onclick="aprobarFlyer('+Number(item.id)+')" style="padding:8px 14px;font-size:12px">Aprobar y publicar</button><button class="btn-dark" onclick="descartarFlyer('+Number(item.id)+')" style="padding:8px 14px;font-size:12px">Descartar</button></div>'
     :'';
-  return '<div class="instruction-line"><strong>'+String(item.marca||'')+' · '+String(item.formato||'post')+' · '+fecha+'</strong><span>'+estadoTxt+'</span><div style="margin-top:8px;display:flex;gap:12px;align-items:flex-start"><img src="'+String(item.imagenUrl||'')+'" style="width:90px;border-radius:8px;border:1px solid rgba(255,255,255,.1)"><div style="flex:1;font-size:12.5px;color:#ccc;max-height:70px;overflow:hidden">'+String(item.caption||'').slice(0,220)+'</div></div>'+acciones+'</div>';
+  return '<div class="instruction-line"><strong>'+escapeHtml(item.marca||'')+' · '+escapeHtml(item.formato||'post')+' · '+escapeHtml(fecha)+'</strong><span>'+escapeHtml(estadoTxt)+'</span><div style="margin-top:8px;display:flex;gap:12px;align-items:flex-start"><img src="'+escapeHtml(item.imagenUrl||'')+'" style="width:90px;border-radius:8px;border:1px solid rgba(255,255,255,.1)"><div style="flex:1;font-size:12.5px;color:#ccc;max-height:70px;overflow:hidden">'+escapeHtml(String(item.caption||'').slice(0,220))+'</div></div>'+acciones+'</div>';
 }
 function socialExecutionRow(item){
   const badgeClass=String(item.status||'pendiente');
   const updated=item?.updatedAt?new Date(item.updatedAt).toLocaleString('es-ES'):'sin fecha';
-  const steps=(item.steps||[]).map(step=>'<div class="social-step"><span>'+String(step.label||step.key||'Paso')+'</span><b class="'+String(step.status||'pendiente')+'">'+String(step.status||'pendiente').replaceAll('_',' ')+'</b></div>').join('');
-  const assigned=(item.assigned||[]).map(worker=>'<span class="social-worker '+String(worker.status||'pendiente')+'">'+String(worker.name||worker.agent||'worker')+' · '+String(worker.status||'pendiente').replaceAll('_',' ')+'</span>').join('');
-  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+String(item.id||'0')+' · '+String(item.title||'Sin título')+'</div><div class="social-exec-meta">Por '+String(item.author||'CEO')+' · Actualizado: '+updated+'</div></div><span class="social-badge '+badgeClass+'">'+badgeClass.replaceAll('_',' ')+'</span></div><div class="social-exec-meta">'+String(item.brief||'Sin brief')+'</div>'+stepsBadge(item.steps)+'<div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
+  const steps=(item.steps||[]).map(step=>'<div class="social-step"><span>'+escapeHtml(step.label||step.key||'Paso')+'</span><b class="'+escapeHtml(step.status||'pendiente')+'">'+escapeHtml(String(step.status||'pendiente').replaceAll('_',' '))+'</b></div>').join('');
+  const assigned=(item.assigned||[]).map(worker=>'<span class="social-worker '+escapeHtml(worker.status||'pendiente')+'">'+escapeHtml(worker.name||worker.agent||'worker')+' · '+escapeHtml(String(worker.status||'pendiente').replaceAll('_',' '))+'</span>').join('');
+  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+escapeHtml(item.id||'0')+' · '+escapeHtml(item.title||'Sin título')+'</div><div class="social-exec-meta">Por '+escapeHtml(item.author||'CEO')+' · Actualizado: '+escapeHtml(updated)+'</div></div><span class="social-badge '+escapeHtml(badgeClass)+'">'+escapeHtml(badgeClass.replaceAll('_',' '))+'</span></div><div class="social-exec-meta">'+escapeHtml(item.brief||'Sin brief')+'</div>'+stepsBadge(item.steps)+'<div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
 }
 function workExecutionRow(item){
   const badgeClass=String(item.status||'pendiente');
   const updated=item?.updatedAt?new Date(item.updatedAt).toLocaleString('es-ES'):'sin fecha';
-  const steps=(item.steps||[]).map(step=>'<div class="social-step"><span>'+String(step.label||step.key||'Paso')+'</span><b class="'+String(step.status||'pendiente')+'">'+String(step.status||'pendiente').replaceAll('_',' ')+'</b></div>').join('');
-  const assigned=(item.assigned||[]).map(worker=>'<span class="social-worker '+String(worker.status||'pendiente')+'">'+String(worker.name||worker.agent||'worker')+' · '+String(worker.status||'pendiente').replaceAll('_',' ')+'</span>').join('');
-  const resources=(item.resources||[]).map(resource=>'<span class="resource-chip">'+String(resource)+'</span>').join('');
-  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+String(item.id||'0')+' · '+String(item.title||'Sin título')+'</div><div class="social-exec-meta">Grupo: '+String(item.department||'general')+' · Por '+String(item.author||'CEO')+' · Actualizado: '+updated+'</div></div><span class="social-badge '+badgeClass+'">'+badgeClass.replaceAll('_',' ')+'</span></div><div class="social-exec-meta">'+String(item.brief||'Sin brief')+'</div><div class="resource-list">'+resources+'</div>'+stepsBadge(item.steps)+'<div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
+  const steps=(item.steps||[]).map(step=>'<div class="social-step"><span>'+escapeHtml(step.label||step.key||'Paso')+'</span><b class="'+escapeHtml(step.status||'pendiente')+'">'+escapeHtml(String(step.status||'pendiente').replaceAll('_',' '))+'</b></div>').join('');
+  const assigned=(item.assigned||[]).map(worker=>'<span class="social-worker '+escapeHtml(worker.status||'pendiente')+'">'+escapeHtml(worker.name||worker.agent||'worker')+' · '+escapeHtml(String(worker.status||'pendiente').replaceAll('_',' '))+'</span>').join('');
+  const resources=(item.resources||[]).map(resource=>'<span class="resource-chip">'+escapeHtml(resource)+'</span>').join('');
+  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+escapeHtml(item.id||'0')+' · '+escapeHtml(item.title||'Sin título')+'</div><div class="social-exec-meta">Grupo: '+escapeHtml(item.department||'general')+' · Por '+escapeHtml(item.author||'CEO')+' · Actualizado: '+escapeHtml(updated)+'</div></div><span class="social-badge '+escapeHtml(badgeClass)+'">'+escapeHtml(badgeClass.replaceAll('_',' '))+'</span></div><div class="social-exec-meta">'+escapeHtml(item.brief||'Sin brief')+'</div><div class="resource-list">'+resources+'</div>'+stepsBadge(item.steps)+'<div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
 }
 function euro(value){
   const num=Number(value||0);
@@ -1884,7 +1950,7 @@ function renderOffice(agents){
         const agentName=agent.name||agent.agent||'Agente';
         const task=agent.task?String(agent.task):'Sin tarea visible en este momento.';
         const state=agent.state||'idle';
-        return '<article class="desk" data-agent-card="'+String(agent.agent||'')+'"><div class="desk-top"><div class="avatar">'+initials(agentName)+'</div><div><div class="desk-name">'+agentName+'</div><div class="desk-role">'+inferDepartment(agent)+'</div></div></div><div class="desk-status"><span class="dot '+state+'"></span>'+stateLabel(state)+' · '+timeAgo(agent.lastSeen)+'</div><div class="task">'+task+'</div></article>';
+        return '<article class="desk" data-agent-card="'+escapeHtml(agent.agent||'')+'"><div class="desk-top"><div class="avatar">'+escapeHtml(initials(agentName))+'</div><div><div class="desk-name">'+escapeHtml(agentName)+'</div><div class="desk-role">'+escapeHtml(inferDepartment(agent))+'</div></div></div><div class="desk-status"><span class="dot '+escapeHtml(state)+'"></span>'+escapeHtml(stateLabel(state))+' · '+escapeHtml(timeAgo(agent.lastSeen))+'</div><div class="task">'+escapeHtml(task)+'</div></article>';
       }).join(''):'<div class="desk-empty">Zona preparada para nuevos agentes</div>')+'</div></div></details></section>';
   }).join('');
 }
@@ -1920,18 +1986,18 @@ function renderTargetPicker(agents){
     helper.textContent='Modo equipo: la orden se envia al grupo '+selectedGroup+'.';
     grid.innerHTML=workers.length ? workers.slice(0,12).map(agent=>{
       const agentName=agent.name||agent.agent||'Agente';
-      return '<button class="target-card active" data-team-card="'+selectedGroup+'"><div class="target-card-head"><div class="avatar">'+initials(agentName)+'</div><div><div class="target-card-name">'+agentName+'</div><div class="target-card-sub">'+inferDepartment(agent)+'</div></div></div><div class="target-card-task">'+String(agent.task||'Sin tarea visible').slice(0,120)+'</div></button>';
+      return '<button class="target-card active" data-team-card="'+escapeHtml(selectedGroup)+'"><div class="target-card-head"><div class="avatar">'+escapeHtml(initials(agentName))+'</div><div><div class="target-card-name">'+escapeHtml(agentName)+'</div><div class="target-card-sub">'+escapeHtml(inferDepartment(agent))+'</div></div></div><div class="target-card-task">'+escapeHtml(String(agent.task||'Sin tarea visible').slice(0,120))+'</div></button>';
     }).join('') : '<div class="desk-empty">Sin trabajadores visibles en este equipo.</div>';
     return;
   }
   if(!target.value || !workers.some(agent=>String(agent.agent)===String(target.value))){
-    target.value=workers[0].agent || '';
+    target.value=workers[0]?.agent || '';
   }
   helper.textContent=target.value ? ('Trabajador elegido: '+target.value) : 'Elige un trabajador para enviar una orden directa.';
   grid.innerHTML=workers.length ? workers.map(agent=>{
     const agentName=agent.name||agent.agent||'Agente';
     const active=String(target.value)===String(agent.agent);
-    return '<button class="target-card '+(active?'active':'')+'" data-worker-card="'+String(agent.agent)+'"><div class="target-card-head"><div class="avatar">'+initials(agentName)+'</div><div><div class="target-card-name">'+agentName+'</div><div class="target-card-sub">'+String(agent.agent)+'</div></div></div><div class="target-card-task">'+String(agent.task||'Sin tarea visible').slice(0,120)+'</div></button>';
+    return '<button class="target-card '+(active?'active':'')+'" data-worker-card="'+escapeHtml(agent.agent)+'"><div class="target-card-head"><div class="avatar">'+escapeHtml(initials(agentName))+'</div><div><div class="target-card-name">'+escapeHtml(agentName)+'</div><div class="target-card-sub">'+escapeHtml(agent.agent)+'</div></div></div><div class="target-card-task">'+escapeHtml(String(agent.task||'Sin tarea visible').slice(0,120))+'</div></button>';
   }).join('') : '<div class="desk-empty">No hay trabajadores activos en este grupo todavia.</div>';
   grid.querySelectorAll('[data-worker-card]').forEach(btn=>btn.onclick=()=>{target.value=btn.getAttribute('data-worker-card')||'';helper.textContent='Trabajador elegido: '+target.value;renderTargetPicker(agents);});
 }
@@ -1939,9 +2005,9 @@ function renderReplyCard(execution,kind){
   const workers=execution.assigned||[];
   const lead=workers[0];
   const leadName=lead?(lead.name||lead.agent):(execution.department||'Equipo');
-  const stepsHtml=(execution.steps||[]).map(step=>'<div class="reply-step"><span>'+String(step.label||step.key||'Paso')+'</span><b class="'+String(step.status||'pendiente')+'">'+String(step.status||'pendiente').replaceAll('_',' ')+'</b></div>').join('');
+  const stepsHtml=(execution.steps||[]).map(step=>'<div class="reply-step"><span>'+escapeHtml(step.label||step.key||'Paso')+'</span><b class="'+escapeHtml(step.status||'pendiente')+'">'+escapeHtml(String(step.status||'pendiente').replaceAll('_',' '))+'</b></div>').join('');
   const otros=workers.slice(1).map(w=>w.name||w.agent).join(', ');
-  return '<div class="reply-card"><div class="reply-card-head"><div class="reply-card-avatar">'+initials(leadName)+'</div><div><div class="reply-card-name">'+leadName+' ha recibido la orden</div><div class="reply-card-sub">'+(execution.department?('Equipo: '+execution.department+(otros?' · con apoyo de '+otros:''))+' · '+kind:kind)+'</div></div></div>'+stepsBadge(execution.steps)+'<div class="reply-steps">'+stepsHtml+'</div></div>';
+  return '<div class="reply-card"><div class="reply-card-head"><div class="reply-card-avatar">'+escapeHtml(initials(leadName))+'</div><div><div class="reply-card-name">'+escapeHtml(leadName)+' ha recibido la orden</div><div class="reply-card-sub">'+escapeHtml(execution.department?('Equipo: '+execution.department+(otros?' · con apoyo de '+otros:''))+' · '+kind:kind)+'</div></div></div>'+stepsBadge(execution.steps)+'<div class="reply-steps">'+stepsHtml+'</div></div>';
 }
 function renderCommandReply(data){
   const box=document.getElementById('command-reply');
@@ -1952,7 +2018,7 @@ function renderCommandReply(data){
   const ackBorder=algunaFallo?'#c0392b':'#2ecc71';
   const ackIcon=listaAuto.length?(todasOk?'✅':'⚠️'):'💬';
   const ackHtml=data.respuestaInmediata
-    ? ('<div class="reply-card" style="border-color:'+ackBorder+'"><div class="reply-card-sub"><strong>'+ackIcon+'</strong> '+data.respuestaInmediata+'</div></div>')
+    ? ('<div class="reply-card" style="border-color:'+ackBorder+'"><div class="reply-card-sub"><strong>'+ackIcon+'</strong> '+escapeHtml(data.respuestaInmediata)+'</div></div>')
     : '';
   const executions=[];
   if(data.socialExecution) executions.push({exec:data.socialExecution,kind:'Ejecución de redes'});
@@ -2024,13 +2090,17 @@ async function refreshSocialExecutions(){
     return;
   }
   try{
-    const response=await fetch('/api/social-executions',{headers:{'x-ceo-token':token}});
+    const response=await fetch('/api/social-executions',{cache:'no-store',headers:{'x-ceo-token':token,'Accept':'application/json'}});
+    if(!response.ok) throw new Error('HTTP '+response.status);
     const data=await response.json();
-    if(!response.ok) throw new Error(data.error||'No autorizado');
-    const list=(data.socialExecutions||[]);
+    if(!data||!Array.isArray(data.socialExecutions)) throw new Error('Respuesta sin socialExecutions[]');
+    const list=data.socialExecutions;
     box.innerHTML=list.length?list.slice(0,6).map(socialExecutionRow).join(''):'<div class="instruction-line"><span>Sin ejecuciones reales de redes todavia.</span></div>';
-  }catch{
-    box.innerHTML='<div class="instruction-line"><span>No se pudieron cargar las ejecuciones de redes.</span></div>';
+    box.dataset.loaded='1';
+  }catch(error){
+    // No pisar datos ya cargados por un fallo puntual -- mismo criterio que refreshOffice().
+    console.error('[operations:social]',{message:String(error&&error.message||error),at:new Date().toISOString()});
+    if(box.dataset.loaded!=='1') box.innerHTML='<div class="instruction-line"><span>No se pudieron cargar las ejecuciones de redes.</span></div>';
   }
 }
 async function refreshReportes(){
@@ -2129,13 +2199,16 @@ async function refreshWorkExecutions(){
     return;
   }
   try{
-    const response=await fetch('/api/work-executions',{headers:{'x-ceo-token':token}});
+    const response=await fetch('/api/work-executions',{cache:'no-store',headers:{'x-ceo-token':token,'Accept':'application/json'}});
+    if(!response.ok) throw new Error('HTTP '+response.status);
     const data=await response.json();
-    if(!response.ok) throw new Error(data.error||'No autorizado');
-    const list=(data.workExecutions||[]);
+    if(!data||!Array.isArray(data.workExecutions)) throw new Error('Respuesta sin workExecutions[]');
+    const list=data.workExecutions;
     box.innerHTML=list.length?list.slice(0,8).map(workExecutionRow).join(''):'<div class="instruction-line"><span>Sin ejecuciones generales todavia.</span></div>';
-  }catch{
-    box.innerHTML='<div class="instruction-line"><span>No se pudieron cargar las ejecuciones generales.</span></div>';
+    box.dataset.loaded='1';
+  }catch(error){
+    console.error('[operations:work]',{message:String(error&&error.message||error),at:new Date().toISOString()});
+    if(box.dataset.loaded!=='1') box.innerHTML='<div class="instruction-line"><span>No se pudieron cargar las ejecuciones generales.</span></div>';
   }
 }
 async function seedGlobalWorkExecutions(){
@@ -2304,19 +2377,42 @@ async function saveBusinessMetrics(){
     if(status) status.textContent='No se pudieron actualizar las métricas.';
   }
 }
+let officeRefreshRunning=false;
+let officeRefreshTimer=null;
 async function refreshOffice(){
+  if(officeRefreshRunning) return;
+  officeRefreshRunning=true;
+  const startedAt=Date.now();
   try{
-    const response=await fetch('/api/metrics');
+    const response=await fetch('/api/metrics',{cache:'no-store',headers:{'Accept':'application/json'}});
+    if(!response.ok) throw new Error('HTTP '+response.status);
+    const contentType=response.headers.get('content-type')||'';
+    if(!contentType.includes('application/json')) throw new Error('Content-Type inesperado: '+contentType);
     const data=await response.json();
-    const agents=(data.agents||[]);
+    if(!data||!Array.isArray(data.agents)) throw new Error('Respuesta sin agents[]');
+    const agents=data.agents;
     renderOffice(agents);
     renderTargetPicker(agents);
     renderMetrics(agents,data);
-  }catch{
-    renderOffice([]);
-    renderTargetPicker([]);
-    renderMetrics([],null);
+  }catch(error){
+    // Mantener el ultimo estado valido: un fallo de red o una extension no
+    // debe convertir 149 agentes reales en cero en la pantalla.
+    console.error('[office:refresh]',{
+      message:String(error&&error.message||error),
+      durationMs:Date.now()-startedAt,
+      at:new Date().toISOString(),
+      page:location.pathname
+    });
+  }finally{
+    officeRefreshRunning=false;
   }
+}
+function scheduleOfficeRefresh(){
+  clearTimeout(officeRefreshTimer);
+  officeRefreshTimer=setTimeout(async()=>{
+    await refreshOffice();
+    scheduleOfficeRefresh();
+  },5000);
 }
 refreshOffice();
 bindCommandPanel();
@@ -2326,7 +2422,7 @@ refreshWorkExecutions();
 refreshReportes();
 refreshAuditorias();
 refreshFlyers();
-setInterval(refreshOffice,5000);
+scheduleOfficeRefresh();
 setInterval(refreshReportes,30000);
 setInterval(refreshAuditorias,20000);
 setInterval(refreshFlyers,20000);
@@ -2411,6 +2507,7 @@ p,span{color:#b8b8c3;line-height:1.6}
         <a class="btn-gold" href="/office">Volver a oficina</a>
         <a class="btn-gold" href="/ceo">Consola del CEO</a>
         <a class="btn-gold" href="/manual">Manual operativo</a>
+        <a class="btn-dark" href="/logout">Cerrar sesión</a>
       </div>
     </div>
     <div class="panel">
@@ -2457,6 +2554,13 @@ p,span{color:#b8b8c3;line-height:1.6}
   </section>
 </div>
 <script>
+function escapeHtml(value){
+  return String(value??'')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
 function percent(part,total){
   if(!total || total<=0) return 0;
   return Math.max(0,Math.min(100,Math.round((part/total)*100)));
@@ -2485,17 +2589,17 @@ function timeAgo(ms){
 function socialExecutionRow(item){
   const badgeClass=String(item.status||'pendiente');
   const updated=item?.updatedAt?new Date(item.updatedAt).toLocaleString('es-ES'):'sin fecha';
-  const steps=(item.steps||[]).map(step=>'<div class="social-step"><span>'+String(step.label||step.key||'Paso')+'</span><b class="'+String(step.status||'pendiente')+'">'+String(step.status||'pendiente').replaceAll('_',' ')+'</b></div>').join('');
-  const assigned=(item.assigned||[]).map(worker=>'<span class="social-worker '+String(worker.status||'pendiente')+'">'+String(worker.name||worker.agent||'worker')+' · '+String(worker.status||'pendiente').replaceAll('_',' ')+'</span>').join('');
-  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+String(item.id||'0')+' · '+String(item.title||'Sin título')+'</div><div class="social-exec-meta">Por '+String(item.author||'CEO')+' · Actualizado: '+updated+'</div></div><span class="social-badge '+badgeClass+'">'+badgeClass.replaceAll('_',' ')+'</span></div><div class="social-exec-meta">'+String(item.brief||'Sin brief')+'</div>'+stepsBadge(item.steps)+'<div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
+  const steps=(item.steps||[]).map(step=>'<div class="social-step"><span>'+escapeHtml(step.label||step.key||'Paso')+'</span><b class="'+escapeHtml(step.status||'pendiente')+'">'+escapeHtml(String(step.status||'pendiente').replaceAll('_',' '))+'</b></div>').join('');
+  const assigned=(item.assigned||[]).map(worker=>'<span class="social-worker '+escapeHtml(worker.status||'pendiente')+'">'+escapeHtml(worker.name||worker.agent||'worker')+' · '+escapeHtml(String(worker.status||'pendiente').replaceAll('_',' '))+'</span>').join('');
+  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+escapeHtml(item.id||'0')+' · '+escapeHtml(item.title||'Sin título')+'</div><div class="social-exec-meta">Por '+escapeHtml(item.author||'CEO')+' · Actualizado: '+escapeHtml(updated)+'</div></div><span class="social-badge '+escapeHtml(badgeClass)+'">'+escapeHtml(badgeClass.replaceAll('_',' '))+'</span></div><div class="social-exec-meta">'+escapeHtml(item.brief||'Sin brief')+'</div>'+stepsBadge(item.steps)+'<div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
 }
 function workExecutionRow(item){
   const badgeClass=String(item.status||'pendiente');
   const updated=item?.updatedAt?new Date(item.updatedAt).toLocaleString('es-ES'):'sin fecha';
-  const steps=(item.steps||[]).map(step=>'<div class="social-step"><span>'+String(step.label||step.key||'Paso')+'</span><b class="'+String(step.status||'pendiente')+'">'+String(step.status||'pendiente').replaceAll('_',' ')+'</b></div>').join('');
-  const assigned=(item.assigned||[]).map(worker=>'<span class="social-worker '+String(worker.status||'pendiente')+'">'+String(worker.name||worker.agent||'worker')+' · '+String(worker.status||'pendiente').replaceAll('_',' ')+'</span>').join('');
-  const resources=(item.resources||[]).map(resource=>'<span class="resource-chip">'+String(resource)+'</span>').join('');
-  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+String(item.id||'0')+' · '+String(item.title||'Sin título')+'</div><div class="social-exec-meta">Grupo: '+String(item.department||'general')+' · Por '+String(item.author||'CEO')+' · Actualizado: '+updated+'</div></div><span class="social-badge '+badgeClass+'">'+badgeClass.replaceAll('_',' ')+'</span></div><div class="social-exec-meta">'+String(item.brief||'Sin brief')+'</div><div class="resource-list">'+resources+'</div>'+stepsBadge(item.steps)+'<div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
+  const steps=(item.steps||[]).map(step=>'<div class="social-step"><span>'+escapeHtml(step.label||step.key||'Paso')+'</span><b class="'+escapeHtml(step.status||'pendiente')+'">'+escapeHtml(String(step.status||'pendiente').replaceAll('_',' '))+'</b></div>').join('');
+  const assigned=(item.assigned||[]).map(worker=>'<span class="social-worker '+escapeHtml(worker.status||'pendiente')+'">'+escapeHtml(worker.name||worker.agent||'worker')+' · '+escapeHtml(String(worker.status||'pendiente').replaceAll('_',' '))+'</span>').join('');
+  const resources=(item.resources||[]).map(resource=>'<span class="resource-chip">'+escapeHtml(resource)+'</span>').join('');
+  return '<article class="social-exec"><div class="social-exec-top"><div><div class="social-exec-title">#'+escapeHtml(item.id||'0')+' · '+escapeHtml(item.title||'Sin título')+'</div><div class="social-exec-meta">Grupo: '+escapeHtml(item.department||'general')+' · Por '+escapeHtml(item.author||'CEO')+' · Actualizado: '+escapeHtml(updated)+'</div></div><span class="social-badge '+escapeHtml(badgeClass)+'">'+escapeHtml(badgeClass.replaceAll('_',' '))+'</span></div><div class="social-exec-meta">'+escapeHtml(item.brief||'Sin brief')+'</div><div class="resource-list">'+resources+'</div>'+stepsBadge(item.steps)+'<div class="social-steps">'+steps+'</div><div class="social-assigned">'+assigned+'</div></article>';
 }
 async function refreshSocialExecutions(){
   const box=document.getElementById('social-exec-list');
@@ -2503,13 +2607,16 @@ async function refreshSocialExecutions(){
   const token=(localStorage.getItem('ceo-panel-token')||'').trim();
   if(!token){ box.innerHTML='<div class="instruction-line"><span>Guarda el token del CEO para ver la ejecución operativa.</span></div>'; return; }
   try{
-    const response=await fetch('/api/social-executions',{headers:{'x-ceo-token':token}});
+    const response=await fetch('/api/social-executions',{cache:'no-store',headers:{'x-ceo-token':token,'Accept':'application/json'}});
+    if(!response.ok) throw new Error('HTTP '+response.status);
     const data=await response.json();
-    if(!response.ok) throw new Error(data.error||'No autorizado');
-    const list=(data.socialExecutions||[]);
+    if(!data||!Array.isArray(data.socialExecutions)) throw new Error('Respuesta sin socialExecutions[]');
+    const list=data.socialExecutions;
     box.innerHTML=list.length?list.slice(0,12).map(socialExecutionRow).join(''):'<div class="instruction-line"><span>Sin ejecuciones reales de redes todavia.</span></div>';
-  }catch{
-    box.innerHTML='<div class="instruction-line"><span>No se pudieron cargar las ejecuciones de redes.</span></div>';
+    box.dataset.loaded='1';
+  }catch(error){
+    console.error('[ceo:social]',{message:String(error&&error.message||error),at:new Date().toISOString()});
+    if(box.dataset.loaded!=='1') box.innerHTML='<div class="instruction-line"><span>No se pudieron cargar las ejecuciones de redes.</span></div>';
   }
 }
 async function refreshWorkExecutions(){
@@ -2518,13 +2625,16 @@ async function refreshWorkExecutions(){
   const token=(localStorage.getItem('ceo-panel-token')||'').trim();
   if(!token){ box.innerHTML='<div class="instruction-line"><span>Guarda el token del CEO para ver las ejecuciones generales.</span></div>'; return; }
   try{
-    const response=await fetch('/api/work-executions',{headers:{'x-ceo-token':token}});
+    const response=await fetch('/api/work-executions',{cache:'no-store',headers:{'x-ceo-token':token,'Accept':'application/json'}});
+    if(!response.ok) throw new Error('HTTP '+response.status);
     const data=await response.json();
-    if(!response.ok) throw new Error(data.error||'No autorizado');
-    const list=(data.workExecutions||[]);
+    if(!data||!Array.isArray(data.workExecutions)) throw new Error('Respuesta sin workExecutions[]');
+    const list=data.workExecutions;
     box.innerHTML=list.length?list.slice(0,16).map(workExecutionRow).join(''):'<div class="instruction-line"><span>Sin ejecuciones generales todavia.</span></div>';
-  }catch{
-    box.innerHTML='<div class="instruction-line"><span>No se pudieron cargar las ejecuciones generales.</span></div>';
+    box.dataset.loaded='1';
+  }catch(error){
+    console.error('[ceo:work]',{message:String(error&&error.message||error),at:new Date().toISOString()});
+    if(box.dataset.loaded!=='1') box.innerHTML='<div class="instruction-line"><span>No se pudieron cargar las ejecuciones generales.</span></div>';
   }
 }
 async function updateSocialExecution(action, stepKey=''){
@@ -2667,6 +2777,7 @@ p,span{color:#b8b8c3;line-height:1.6}
         <a class="btn-gold" href="/office">Oficina</a>
         <a class="btn-gold" href="/ceo">Consola del CEO</a>
         <a class="btn-gold" href="/operations">Operaciones</a>
+        <a class="btn-dark" href="/logout">Cerrar sesión</a>
       </div>
     </div>
     <div class="panel">
@@ -2692,6 +2803,13 @@ p,span{color:#b8b8c3;line-height:1.6}
   </section>
 </div>
 <script>
+function escapeHtml(value){
+  return String(value??'')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
 const CANAL_LABEL={email:'Email',whatsapp:'WhatsApp',instagram:'Instagram',web:'Web',voz:'Llamada'};
 let filtroActual='todos';
 let ultimaLista=[];
@@ -2711,27 +2829,28 @@ function timeAgo(ts){
   return Math.floor(h/24)+'d';
 }
 function convCard(c){
+  const idNum=Number(c.id);
   const canal=c.canal||'web';
   const label=CANAL_LABEL[canal]||canal;
   const ultimo=c.ultimoMensaje?c.ultimoMensaje.texto:'(sin mensajes)';
-  const tags=(c.etiquetas||[]).map(function(t){return '<span class="conv-tag">'+t+'</span>';}).join('');
+  const tags=(c.etiquetas||[]).map(function(t){return '<span class="conv-tag">'+escapeHtml(t)+'</span>';}).join('');
   let sugHtml='';
   if(c.sugerenciaIA){
     sugHtml='<div class="conv-sug"><div class="conv-sug-label">Sugerencia de la IA</div>'+
-      '<textarea id="sug-'+c.id+'">'+c.sugerenciaIA+'</textarea>'+
+      '<textarea id="sug-'+idNum+'">'+escapeHtml(c.sugerenciaIA)+'</textarea>'+
       '<div class="conv-sug-actions">'+
-      '<button class="btn-gold" onclick="responder('+c.id+',\\'aprobar\\')">Aprobar y enviar</button>'+
-      '<button class="btn-dark" onclick="responder('+c.id+',\\'editar\\')">Enviar editado</button>'+
-      '<button class="btn-dark" onclick="responder('+c.id+',\\'descartar\\')">Descartar</button>'+
+      '<button class="btn-gold" onclick="responder('+idNum+',\\'aprobar\\')">Aprobar y enviar</button>'+
+      '<button class="btn-dark" onclick="responder('+idNum+',\\'editar\\')">Enviar editado</button>'+
+      '<button class="btn-dark" onclick="responder('+idNum+',\\'descartar\\')">Descartar</button>'+
       '</div></div>';
   }
   return '<div class="conv-card">'+
-    '<div class="conv-top"><div><span class="conv-canal '+canal+'">'+label+'</span><span class="conv-nombre">'+(c.nombreContacto||c.identificador)+'</span></div>'+
-    '<span class="conv-time">'+timeAgo(c.updatedAt)+'</span></div>'+
+    '<div class="conv-top"><div><span class="conv-canal '+escapeHtml(canal)+'">'+escapeHtml(label)+'</span><span class="conv-nombre">'+escapeHtml(c.nombreContacto||c.identificador)+'</span></div>'+
+    '<span class="conv-time">'+escapeHtml(timeAgo(c.updatedAt))+'</span></div>'+
     '<div class="conv-tags">'+tags+'</div>'+
-    '<div class="conv-ultimo">'+ultimo+'</div>'+
+    '<div class="conv-ultimo">'+escapeHtml(ultimo)+'</div>'+
     sugHtml+
-    '<div class="conv-add-tag"><input id="tag-input-'+c.id+'" placeholder="Añadir etiqueta CRM..."><button class="btn-dark" onclick="anadirEtiqueta('+c.id+')">+</button></div>'+
+    '<div class="conv-add-tag"><input id="tag-input-'+idNum+'" placeholder="Añadir etiqueta CRM..."><button class="btn-dark" onclick="anadirEtiqueta('+idNum+')">+</button></div>'+
     '</div>';
 }
 function renderLista(){
@@ -2739,15 +2858,19 @@ function renderLista(){
   const filtradas=filtroActual==='todos'?ultimaLista:ultimaLista.filter(function(c){return c.canal===filtroActual;});
   box.innerHTML=filtradas.length?filtradas.map(convCard).join(''):'<div class="empty-hint">Sin conversaciones todavia en este canal.</div>';
 }
+let inboxLoadedOk=false;
 async function refreshInbox(){
   try{
-    const response=await fetch('/api/inbox');
+    const response=await fetch('/api/inbox',{cache:'no-store',headers:{'Accept':'application/json'}});
+    if(!response.ok) throw new Error('HTTP '+response.status);
     const data=await response.json();
-    if(!response.ok) throw new Error(data.error||'No autorizado');
-    ultimaLista=data.conversaciones||[];
+    if(!data||!Array.isArray(data.conversaciones)) throw new Error('Respuesta sin conversaciones[]');
+    ultimaLista=data.conversaciones;
     renderLista();
-  }catch(e){
-    document.getElementById('conv-list').innerHTML='<div class="empty-hint">No se pudo cargar el inbox.</div>';
+    inboxLoadedOk=true;
+  }catch(error){
+    console.error('[inbox:refresh]',{message:String(error&&error.message||error),at:new Date().toISOString()});
+    if(!inboxLoadedOk) document.getElementById('conv-list').innerHTML='<div class="empty-hint">No se pudo cargar el inbox.</div>';
   }
 }
 async function anadirEtiqueta(id){
@@ -2893,6 +3016,7 @@ td{padding:10px 14px;border-top:1px solid rgba(255,255,255,.05);vertical-align:t
     <div class="button-row" style="margin-top:14px">
       <a class="btn-gold" href="/office">Volver a oficina</a>
       <a class="btn-gold" href="/operations">Ir a operaciones</a>
+      <a class="btn-dark" href="/logout">Cerrar sesión</a>
     </div>
   </div>
   <div class="panel">
@@ -2970,8 +3094,8 @@ function renderWordpressEmbedJs() {
     Promise.all([fetch(metricsUrl).then(r => r.json()).catch(() => null), fetch(businessUrl).then(r => r.json()).catch(() => null)]).then(([metricsData, businessData]) => {
       const box = document.getElementById('vms-office-mini-stats');
       if (!box) return;
-      const metrics = metricsData && metricsData.metrics  metricsData.metrics : {};
-      const biz = businessData && businessData.businessMetrics  businessData.businessMetrics : {};
+      const metrics = metricsData && metricsData.metrics ? metricsData.metrics : {};
+      const biz = businessData && businessData.businessMetrics ? businessData.businessMetrics : {};
       const fmt = n => Number(n || 0).toLocaleString('es-ES');
       const eur = n => new Intl.NumberFormat('es-ES',{style:'currency',currency:'EUR',maximumFractionDigits:0}).format(Number(n || 0));
       const cards = [
@@ -2991,11 +3115,29 @@ function renderWordpressEmbedJs() {
 }
 
 
-function readBody(req) {
+function readBody(req, maxBytes = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on('data', (chunk) => chunks.push(chunk));
-    req.on('end', () => resolve(Buffer.concat(chunks).toString()));
+    let size = 0;
+    let tooLarge = false;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        tooLarge = true;
+        chunks.length = 0;
+        return;
+      }
+      if (!tooLarge) chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (tooLarge) {
+        const error = new Error('Request body too large');
+        error.code = 'BODY_TOO_LARGE';
+        reject(error);
+        return;
+      }
+      resolve(Buffer.concat(chunks).toString());
+    });
     req.on('error', reject);
   });
 }
@@ -3057,6 +3199,7 @@ function isTokenProtectedPath(pathname) {
 }
 
 const server = http.createServer(async (req, res) => {
+ try {
   const url = new URL(req.url || '/', `http://localhost:${port}`);
   const clientIp = getClientIp(req);
   const protectedPath = isTokenProtectedPath(url.pathname);
@@ -3072,6 +3215,9 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Heartbeat-Token, X-CEO-Token');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -3080,13 +3226,13 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(renderStatusHtml());
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/login') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(renderLoginHtml(url.searchParams.get('error')));
     return;
   }
@@ -3125,7 +3271,7 @@ const server = http.createServer(async (req, res) => {
       res.end();
       return;
     }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(renderSetupHtml(url.searchParams.get('error')));
     return;
   }
@@ -3161,7 +3307,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/logout') {
     const cookies = parseCookies(req);
-    if (cookies[SESSION_COOKIE]) sessions.delete(cookies[SESSION_COOKIE]);
+    if (cookies[SESSION_COOKIE]) { sessions.delete(cookies[SESSION_COOKIE]); saveSessions(); }
     res.writeHead(302, {
       Location: '/login',
       'Set-Cookie': `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`,
@@ -3179,31 +3325,31 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/office') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(stripMarkedSection(renderOfficeHtml(), 'CEO_CONSOLE', '<section class="metrics-grid"><div class="panel metrics-card"><h3>Consola del CEO</h3><div class="events-list"><div class="event-line"><strong>Movida a su propia página</strong><span>Da órdenes de trabajo y controla las métricas desde la Consola del CEO, separada para que la oficina se vea limpia.</span></div></div><div class="button-row" style="margin-top:14px"><a class="btn-gold" href="/ceo" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Abrir Consola del CEO</a></div></div></section>'));
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/ceo') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(stripMarkedSection(renderOfficeHtml(), 'AGENT_GRID', ''));
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/operations') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(renderOperationsHtml());
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/manual') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(renderManualHtml());
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/inbox') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(renderInboxHtml());
     return;
   }
@@ -3282,7 +3428,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     try {
-      const body = await readBody(req);
+      const body = await readBody(req, 20 * 1024 * 1024);
       const payload = JSON.parse(body || '{}');
       if (!payload.fecha || !payload.html) {
         json(res, 400, { error: 'Missing required fields: fecha, html' });
@@ -3332,6 +3478,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, {
       'Content-Type': ext === 'pdf' ? 'application/pdf' : 'text/html; charset=utf-8',
       'Content-Disposition': `inline; filename="${nombre}"`,
+      ...(ext === 'html' ? { 'Content-Security-Policy': "sandbox; default-src 'none'; img-src https: data:; style-src 'unsafe-inline'" } : {}),
     });
     res.end(fs.readFileSync(filePath));
     return;
@@ -3553,10 +3700,14 @@ const server = http.createServer(async (req, res) => {
     const id = Number(url.pathname.split('/')[3]);
     const flyer = flyers.find((f) => f.id === id);
     if (!flyer) { json(res, 404, { error: 'No encontrado' }); return; }
-    flyer.estado = 'descartado';
-    flyer.updatedAt = Date.now();
-    saveState();
-    json(res, 200, { ok: true, flyer });
+    try {
+      flyer.estado = 'descartado';
+      flyer.updatedAt = Date.now();
+      saveState();
+      json(res, 200, { ok: true, flyer });
+    } catch (error) {
+      json(res, 500, { error: String(error.message || error) });
+    }
     return;
   }
 
@@ -3658,6 +3809,7 @@ const server = http.createServer(async (req, res) => {
       if (payload.agent) {
         agents.delete(payload.agent);
         pushEvent(payload.agent, { type: 'remove' });
+        saveState();
         broadcastAgents();
       }
       json(res, 200, { ok: true });
@@ -3752,6 +3904,14 @@ const server = http.createServer(async (req, res) => {
   }
 
   json(res, 404, { error: 'Not found' });
+ } catch (error) {
+  console.error('[http:unhandled]', { message: String(error && error.message || error), path: req.url, at: new Date().toISOString() });
+  if (!res.headersSent) {
+    json(res, 500, { error: 'Error interno' });
+  } else if (!res.writableEnded) {
+    res.end();
+  }
+ }
 });
 
 const wss = new WebSocketServer({ server, path: '/ws' });
@@ -3766,6 +3926,7 @@ wss.on('connection', (ws, req) => {
 });
 
 loadState();
+loadSessions();
 loadAdminFromFile();
 setInterval(sweepAgents, 5000);
 
