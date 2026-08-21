@@ -2266,7 +2266,10 @@ function bindCommandPanel(){
   const groupSelect=document.getElementById('target-group');
   if(send) send.onclick=sendInstruction;
   if(scope) scope.onchange=()=>renderTargetPicker(OFFICE_AGENTS_CACHE);
-  if(groupSelect) groupSelect.onchange=()=>renderTargetPicker(OFFICE_AGENTS_CACHE);
+  if(groupSelect) groupSelect.onchange=()=>{
+    document.getElementById('target').value=groupSelect.value;
+    renderTargetPicker(OFFICE_AGENTS_CACHE);
+  };
   if(tokenInput) tokenInput.value=localStorage.getItem('ceo-panel-token')||'';
   if(saveToken) saveToken.onclick=()=>{
     const token=(tokenInput.value||'').trim();
