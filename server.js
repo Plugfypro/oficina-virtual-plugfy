@@ -1775,7 +1775,9 @@ function reporteRow(item){
 function auditoriaRow(item){
   const a=item.auditoria||{};
   const fecha=a.fecha?new Date(a.fecha).toLocaleString('es-ES'):'sin fecha';
-  return '<div class="instruction-line"><strong>'+escapeHtml(a.nombre||item.nombreContacto||'Sin nombre')+' · '+escapeHtml(fecha)+'</strong><span>Tel: '+escapeHtml(a.telefono||item.identificador||'-')+' · Email: '+escapeHtml(a.email||'-')+' · Interes: '+escapeHtml(a.tipoServicio||'-')+'</span><div style="margin-top:6px"><a href="/inbox" style="color:#B8A35A">Ver conversación en el Inbox</a></div></div>';
+  const cita=a.fechaCitaIso?new Date(a.fechaCitaIso).toLocaleString('es-ES',{weekday:'long',day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'}):null;
+  const citaHtml=cita?'<div style="margin-top:4px;color:#D9B84A;font-weight:600">📅 Cita confirmada: '+escapeHtml(cita)+'</div>':'<div style="margin-top:4px;color:#999">Sin hora de cita confirmada todavia</div>';
+  return '<div class="instruction-line"><strong>'+escapeHtml(a.nombre||item.nombreContacto||'Sin nombre')+' · solicitado '+escapeHtml(fecha)+'</strong><span>Tel: '+escapeHtml(a.telefono||item.identificador||'-')+' · Email: '+escapeHtml(a.email||'-')+' · Interes: '+escapeHtml(a.tipoServicio||'-')+'</span>'+citaHtml+'<div style="margin-top:6px"><a href="/inbox" style="color:#B8A35A">Ver conversación en el Inbox</a></div></div>';
 }
 function flyerRow(item){
   const fecha=item.createdAt?new Date(item.createdAt).toLocaleString('es-ES'):'sin fecha';
@@ -2724,73 +2726,96 @@ function renderInboxHtml() {
 <title>Inbox unificado · Oficina Virtual</title>
 <style>
 *{box-sizing:border-box}
-body{margin:0;font-family:Inter,Segoe UI,sans-serif;background:linear-gradient(180deg,#0b0b0f 0%,#13131a 100%);color:#f3f3f5}
-.shell{max-width:1320px;margin:0 auto;padding:24px}
-.hero{display:grid;gap:18px;grid-template-columns:1.1fr .9fr}
-.panel{background:rgba(20,20,27,.92);border:1px solid rgba(212,175,55,.20);border-radius:22px;box-shadow:0 20px 60px rgba(0,0,0,.28);padding:20px}
-.eyebrow{color:#d4af37;font-size:12px;text-transform:uppercase;letter-spacing:.18em;margin-bottom:12px}
-h1,h2,h3{margin:0 0 12px}
-h1{font-size:38px;line-height:1.05}
-p,span{color:#b8b8c3;line-height:1.6}
-.button-row{display:flex;gap:10px;flex-wrap:wrap}
-.btn-gold,.btn-dark{padding:12px 16px;border-radius:999px;font-weight:800;text-decoration:none;cursor:pointer;border:none;font-size:13px}
+body{margin:0;font-family:Inter,Segoe UI,sans-serif;background:#0b0b0f;color:#f3f3f5;height:100vh;overflow:hidden}
+.topbar{display:flex;align-items:center;gap:14px;padding:12px 20px;border-bottom:1px solid rgba(212,175,55,.18);background:rgba(20,20,27,.96)}
+.topbar h1{font-size:16px;margin:0;font-weight:800;flex:0 0 auto}
+.topbar .nav{display:flex;gap:8px;flex-wrap:wrap}
+.topbar .nav a{font-size:12px;padding:7px 12px;border-radius:999px;text-decoration:none;color:#d9dae2;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)}
+.topbar .nav a.gold{background:#d4af37;color:#121216;border-color:transparent;font-weight:800}
+.topbar .token-wrap{margin-left:auto;display:flex;gap:8px;align-items:center}
+.topbar input{border:1px solid rgba(255,255,255,.08);background:rgba(10,10,14,.88);color:#f4f4f7;border-radius:10px;padding:8px 10px;font-size:12px;width:190px}
+.topbar button{border:none;border-radius:10px;padding:8px 12px;font-size:12px;font-weight:800;background:rgba(255,255,255,.06);color:#f4f4f7;cursor:pointer}
+.status-line{font-size:11.5px;color:#8a8a95;padding:4px 20px 0}
+.app{display:grid;grid-template-columns:340px 1fr;height:calc(100vh - 78px)}
+.sidebar{border-right:1px solid rgba(255,255,255,.06);display:flex;flex-direction:column;min-height:0}
+.filter-row{display:flex;gap:6px;flex-wrap:wrap;padding:12px 14px}
+.filter-chip{padding:6px 11px;border-radius:999px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);color:#d9dae2;font-size:11.5px;cursor:pointer}
+.filter-chip.active{background:rgba(212,175,55,.16);border-color:rgba(212,175,55,.4);color:#f0d679}
+.conv-list{flex:1;overflow-y:auto;padding:0 8px 12px}
+.conv-row{display:flex;gap:10px;align-items:flex-start;padding:11px 10px;border-radius:14px;cursor:pointer;margin-bottom:2px}
+.conv-row:hover{background:rgba(255,255,255,.03)}
+.conv-row.active{background:rgba(212,175,55,.12)}
+.avatar{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;color:#121216;flex-shrink:0}
+.avatar.email{background:#57c7ff}
+.avatar.whatsapp{background:#23d18b}
+.avatar.instagram{background:#e055b7}
+.avatar.web{background:#f0b94f}
+.avatar.voz{background:#b28fff}
+.conv-row-main{flex:1;min-width:0}
+.conv-row-top{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.conv-row-name{font-weight:700;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.conv-row-time{font-size:10.5px;color:#8a8a95;flex-shrink:0}
+.conv-row-preview{font-size:12px;color:#9b9ba6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+.conv-row-tags{display:flex;gap:4px;margin-top:5px;flex-wrap:wrap}
+.mini-tag{font-size:9.5px;padding:2px 7px;border-radius:999px;background:rgba(212,175,55,.1);border:1px solid rgba(212,175,55,.25);color:#f0d679}
+.conv-row-ai-dot{width:8px;height:8px;border-radius:50%;background:#23d18b;flex-shrink:0;margin-top:5px}
+.empty-hint{color:#8a8a95;font-size:13px;padding:24px;text-align:center}
+.thread{display:flex;flex-direction:column;min-height:0;background:radial-gradient(circle at 50% 0%,#141419 0%,#0b0b0f 60%)}
+.thread-empty{flex:1;display:flex;align-items:center;justify-content:center;color:#6f6f7a;font-size:14px;flex-direction:column;gap:10px}
+.thread-view{display:none;flex-direction:column;height:100%;min-height:0}
+.thread-header{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0}
+.thread-back{display:none;background:none;border:none;color:#f0d679;font-size:20px;cursor:pointer;padding:0 4px}
+.thread-header-name{font-weight:800;font-size:15px}
+.thread-header-meta{font-size:11.5px;color:#8a8a95}
+.thread-messages{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:10px}
+.msg-row{display:flex}
+.msg-row.out{justify-content:flex-end}
+.msg-row.in{justify-content:flex-start}
+.msg-bubble{max-width:62%;padding:9px 13px;border-radius:16px;font-size:13.5px;line-height:1.45;position:relative}
+.msg-row.out .msg-bubble{background:linear-gradient(135deg,#d4af37,#b8952e);color:#121216;border-bottom-right-radius:4px}
+.msg-row.in .msg-bubble{background:rgba(255,255,255,.06);color:#f0f0f3;border:1px solid rgba(255,255,255,.06);border-bottom-left-radius:4px}
+.msg-time{font-size:9.5px;opacity:.65;margin-top:4px;display:block;text-align:right}
+.thread-ai-suggestion{margin:0 20px 12px;padding:14px;border-radius:14px;background:rgba(35,209,139,.06);border:1px solid rgba(35,209,139,.25);flex-shrink:0}
+.thread-ai-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#23d18b;font-weight:800;margin-bottom:6px}
+.thread-ai-suggestion textarea{width:100%;min-height:60px;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(10,10,14,.88);color:#f4f4f7;padding:10px;font-family:inherit;font-size:13px}
+.thread-ai-actions{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.btn-gold,.btn-dark{padding:9px 14px;border-radius:999px;font-weight:800;text-decoration:none;cursor:pointer;border:none;font-size:12px}
 .btn-gold{background:#d4af37;color:#121216}
 .btn-dark{border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);color:#f4f4f7}
-.token-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px}
-.token-row input{flex:1 1 240px;min-width:0;border:1px solid rgba(255,255,255,.08);background:rgba(10,10,14,.88);color:#f4f4f7;border-radius:14px;padding:12px 14px}
-.filter-row{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}
-.filter-chip{padding:8px 14px;border-radius:999px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);color:#d9dae2;font-size:12px;cursor:pointer}
-.filter-chip.active{background:rgba(212,175,55,.16);border-color:rgba(212,175,55,.4);color:#f0d679}
-.conv-list{display:grid;gap:12px}
-.conv-card{padding:16px 18px;border-radius:18px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06)}
-.conv-top{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap}
-.conv-canal{display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;margin-right:8px}
-.conv-canal.email{background:rgba(87,199,255,.14);color:#57c7ff}
-.conv-canal.whatsapp{background:rgba(35,209,139,.14);color:#23d18b}
-.conv-canal.instagram{background:rgba(224,85,183,.14);color:#e055b7}
-.conv-canal.web{background:rgba(240,185,79,.14);color:#f0b94f}
-.conv-canal.voz{background:rgba(178,143,255,.14);color:#b28fff}
-.conv-nombre{font-weight:800;font-size:15px}
-.conv-time{font-size:11px;color:#8a8a95}
-.conv-ultimo{margin:10px 0;font-size:13.5px;color:#d9dae2}
-.conv-tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
-.conv-tag{padding:4px 10px;border-radius:999px;background:rgba(212,175,55,.1);border:1px solid rgba(212,175,55,.25);color:#f0d679;font-size:11px}
-.conv-sug{margin-top:12px;padding:14px;border-radius:14px;background:rgba(35,209,139,.06);border:1px solid rgba(35,209,139,.25)}
-.conv-sug-label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#23d18b;font-weight:800;margin-bottom:6px}
-.conv-sug textarea{width:100%;min-height:70px;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(10,10,14,.88);color:#f4f4f7;padding:10px;font-family:inherit;font-size:13px}
-.conv-sug-actions{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
-.conv-add-tag{display:flex;gap:6px;margin-top:6px}
-.conv-add-tag input{flex:1;border:1px solid rgba(255,255,255,.08);background:rgba(10,10,14,.88);color:#f4f4f7;border-radius:10px;padding:8px 10px;font-size:12px}
-.empty-hint{color:#8a8a95;font-size:13px;padding:20px;text-align:center}
-.command-status{margin-top:10px;font-size:12.5px;color:#b8c7b0}
-@media (max-width:980px){.hero{grid-template-columns:1fr}}
+.thread-composer{display:flex;gap:8px;padding:14px 20px;border-top:1px solid rgba(255,255,255,.06);flex-shrink:0}
+.thread-composer input{flex:1;border:1px solid rgba(255,255,255,.08);background:rgba(10,10,14,.88);color:#f4f4f7;border-radius:999px;padding:11px 16px;font-size:13.5px}
+.thread-tags{padding:0 20px 16px;flex-shrink:0}
+.thread-tags-list{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.thread-tag{padding:4px 10px;border-radius:999px;background:rgba(212,175,55,.1);border:1px solid rgba(212,175,55,.25);color:#f0d679;font-size:11px}
+.thread-add-tag{display:flex;gap:6px}
+.thread-add-tag input{flex:1;border:1px solid rgba(255,255,255,.08);background:rgba(10,10,14,.88);color:#f4f4f7;border-radius:10px;padding:8px 10px;font-size:12px}
+@media (max-width:820px){
+  .app{grid-template-columns:1fr}
+  .sidebar{display:flex}
+  .sidebar.hidden-mobile{display:none}
+  .thread{display:none}
+  .thread.active-mobile{display:flex}
+  .thread-back{display:inline-block}
+}
 </style>
 </head>
 <body>
-<div class="shell">
-  <section class="hero">
-    <div class="panel">
-      <div class="eyebrow">Inbox unificado</div>
-      <h1>Todas las conversaciones, un solo sitio</h1>
-      <p>Email, WhatsApp, Instagram, web y llamadas entran aquí. La IA sugiere una respuesta por conversación — apruébala, edítala o descártala antes de que salga.</p>
-      <div class="button-row" style="margin-top:14px">
-        <a class="btn-gold" href="/office">Oficina</a>
-        <a class="btn-gold" href="/ceo">Consola del CEO</a>
-        <a class="btn-gold" href="/operations">Operaciones</a>
-        <a class="btn-dark" href="/logout">Cerrar sesión</a>
-      </div>
-    </div>
-    <div class="panel">
-      <h3>Token del CEO</h3>
-      <div class="token-row">
-        <input id="ceo-token" placeholder="Token privado del CEO">
-        <button class="btn-dark" id="save-token">Guardar token</button>
-      </div>
-      <div class="command-status" id="global-status">Guarda el token para aprobar/editar/descartar respuestas.</div>
-    </div>
-  </section>
-  <section class="panel" style="margin-top:18px">
-    <h3>Conversaciones</h3>
+<div class="topbar">
+  <h1>Inbox unificado</h1>
+  <div class="nav">
+    <a href="/office">Oficina</a>
+    <a href="/ceo">CEO</a>
+    <a href="/operations">Operaciones</a>
+  </div>
+  <div class="token-wrap">
+    <input id="ceo-token" placeholder="Token del CEO">
+    <button id="save-token">Guardar</button>
+    <a class="btn-dark" href="/logout" style="text-decoration:none;padding:8px 12px;border-radius:10px;font-size:12px">Salir</a>
+  </div>
+</div>
+<div class="status-line" id="global-status">Guarda el token para aprobar/editar/descartar respuestas.</div>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
     <div class="filter-row" id="filter-row">
       <div class="filter-chip active" data-canal="todos">Todos</div>
       <div class="filter-chip" data-canal="email">Email</div>
@@ -2800,7 +2825,43 @@ p,span{color:#b8b8c3;line-height:1.6}
       <div class="filter-chip" data-canal="voz">Llamadas</div>
     </div>
     <div class="conv-list" id="conv-list"><div class="empty-hint">Cargando...</div></div>
-  </section>
+  </aside>
+  <main class="thread" id="thread">
+    <div class="thread-empty" id="thread-empty">
+      <div>💬</div>
+      <div>Selecciona una conversación para verla</div>
+    </div>
+    <div class="thread-view" id="thread-view">
+      <div class="thread-header">
+        <button class="thread-back" id="thread-back">←</button>
+        <div>
+          <div class="thread-header-name" id="thread-header-name">-</div>
+          <div class="thread-header-meta" id="thread-header-meta">-</div>
+        </div>
+      </div>
+      <div class="thread-messages" id="thread-messages"></div>
+      <div class="thread-ai-suggestion" id="thread-ai-suggestion" style="display:none">
+        <div class="thread-ai-label">Sugerencia de la IA</div>
+        <textarea id="ai-textarea"></textarea>
+        <div class="thread-ai-actions">
+          <button class="btn-gold" id="ai-aprobar">Aprobar y enviar</button>
+          <button class="btn-dark" id="ai-editar">Enviar editado</button>
+          <button class="btn-dark" id="ai-descartar">Descartar</button>
+        </div>
+      </div>
+      <div class="thread-composer">
+        <input id="composer-input" placeholder="Escribe una respuesta y pulsa Enter...">
+        <button class="btn-gold" id="composer-send">Enviar</button>
+      </div>
+      <div class="thread-tags">
+        <div class="thread-tags-list" id="thread-tags-list"></div>
+        <div class="thread-add-tag">
+          <input id="thread-tag-input" placeholder="Añadir etiqueta CRM...">
+          <button class="btn-dark" id="thread-tag-add">+</button>
+        </div>
+      </div>
+    </div>
+  </main>
 </div>
 <script>
 function escapeHtml(value){
@@ -2813,6 +2874,7 @@ function escapeHtml(value){
 const CANAL_LABEL={email:'Email',whatsapp:'WhatsApp',instagram:'Instagram',web:'Web',voz:'Llamada'};
 let filtroActual='todos';
 let ultimaLista=[];
+let conversacionActivaId=null;
 function getToken(){return (localStorage.getItem('ceo-panel-token')||'').trim();}
 document.getElementById('save-token').addEventListener('click',function(){
   const val=document.getElementById('ceo-token').value.trim();
@@ -2828,35 +2890,31 @@ function timeAgo(ts){
   if(h<24) return h+'h';
   return Math.floor(h/24)+'d';
 }
-function convCard(c){
+function iniciales(nombre){
+  const s=String(nombre||'?').trim();
+  return s ? s[0].toUpperCase() : '?';
+}
+function convRow(c){
   const idNum=Number(c.id);
   const canal=c.canal||'web';
   const label=CANAL_LABEL[canal]||canal;
   const ultimo=c.ultimoMensaje?c.ultimoMensaje.texto:'(sin mensajes)';
-  const tags=(c.etiquetas||[]).map(function(t){return '<span class="conv-tag">'+escapeHtml(t)+'</span>';}).join('');
-  let sugHtml='';
-  if(c.sugerenciaIA){
-    sugHtml='<div class="conv-sug"><div class="conv-sug-label">Sugerencia de la IA</div>'+
-      '<textarea id="sug-'+idNum+'">'+escapeHtml(c.sugerenciaIA)+'</textarea>'+
-      '<div class="conv-sug-actions">'+
-      '<button class="btn-gold" onclick="responder('+idNum+',\\'aprobar\\')">Aprobar y enviar</button>'+
-      '<button class="btn-dark" onclick="responder('+idNum+',\\'editar\\')">Enviar editado</button>'+
-      '<button class="btn-dark" onclick="responder('+idNum+',\\'descartar\\')">Descartar</button>'+
-      '</div></div>';
-  }
-  return '<div class="conv-card">'+
-    '<div class="conv-top"><div><span class="conv-canal '+escapeHtml(canal)+'">'+escapeHtml(label)+'</span><span class="conv-nombre">'+escapeHtml(c.nombreContacto||c.identificador)+'</span></div>'+
-    '<span class="conv-time">'+escapeHtml(timeAgo(c.updatedAt))+'</span></div>'+
-    '<div class="conv-tags">'+tags+'</div>'+
-    '<div class="conv-ultimo">'+escapeHtml(ultimo)+'</div>'+
-    sugHtml+
-    '<div class="conv-add-tag"><input id="tag-input-'+idNum+'" placeholder="Añadir etiqueta CRM..."><button class="btn-dark" onclick="anadirEtiqueta('+idNum+')">+</button></div>'+
+  const tags=(c.etiquetas||[]).slice(0,3).map(function(t){return '<span class="mini-tag">'+escapeHtml(t)+'</span>';}).join('');
+  const activeClass=idNum===conversacionActivaId?' active':'';
+  const aiDot=c.sugerenciaIA?'<div class="conv-row-ai-dot" title="Sugerencia de IA pendiente"></div>':'';
+  return '<div class="conv-row'+activeClass+'" data-id="'+idNum+'">'+
+    '<div class="avatar '+escapeHtml(canal)+'">'+escapeHtml(iniciales(c.nombreContacto||c.identificador))+'</div>'+
+    '<div class="conv-row-main">'+
+    '<div class="conv-row-top"><span class="conv-row-name">'+escapeHtml(c.nombreContacto||c.identificador)+'</span><span class="conv-row-time">'+escapeHtml(timeAgo(c.updatedAt))+'</span></div>'+
+    '<div class="conv-row-preview">'+escapeHtml(label)+' · '+escapeHtml(ultimo)+'</div>'+
+    '<div class="conv-row-tags">'+tags+'</div>'+
+    '</div>'+aiDot+
     '</div>';
 }
 function renderLista(){
   const box=document.getElementById('conv-list');
   const filtradas=filtroActual==='todos'?ultimaLista:ultimaLista.filter(function(c){return c.canal===filtroActual;});
-  box.innerHTML=filtradas.length?filtradas.map(convCard).join(''):'<div class="empty-hint">Sin conversaciones todavia en este canal.</div>';
+  box.innerHTML=filtradas.length?filtradas.map(convRow).join(''):'<div class="empty-hint">Sin conversaciones todavia en este canal.</div>';
 }
 let inboxLoadedOk=false;
 async function refreshInbox(){
@@ -2868,37 +2926,103 @@ async function refreshInbox(){
     ultimaLista=data.conversaciones;
     renderLista();
     inboxLoadedOk=true;
+    if(conversacionActivaId!==null) cargarConversacion(conversacionActivaId,true);
   }catch(error){
     console.error('[inbox:refresh]',{message:String(error&&error.message||error),at:new Date().toISOString()});
     if(!inboxLoadedOk) document.getElementById('conv-list').innerHTML='<div class="empty-hint">No se pudo cargar el inbox.</div>';
   }
 }
-async function anadirEtiqueta(id){
-  const token=getToken();
-  if(!token){document.getElementById('global-status').textContent='Guarda el token del CEO primero.';return;}
-  const input=document.getElementById('tag-input-'+id);
-  const etiqueta=(input.value||'').trim();
-  if(!etiqueta) return;
-  await fetch('/api/inbox/'+id+'/etiquetas',{method:'POST',headers:{'Content-Type':'application/json','x-ceo-token':token},body:JSON.stringify({etiqueta:etiqueta})});
-  input.value='';
-  refreshInbox();
+function renderMensajes(mensajes){
+  const box=document.getElementById('thread-messages');
+  const wasAtBottom=box.scrollTop+box.clientHeight>=box.scrollHeight-40;
+  box.innerHTML=(mensajes||[]).map(function(m){
+    const out=m.autor==='sistema';
+    const hora=new Date(m.timestamp).toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'});
+    return '<div class="msg-row '+(out?'out':'in')+'"><div class="msg-bubble">'+escapeHtml(m.texto)+'<span class="msg-time">'+hora+'</span></div></div>';
+  }).join('') || '<div class="empty-hint">Sin mensajes todavia.</div>';
+  if(wasAtBottom) box.scrollTop=box.scrollHeight;
 }
-async function responder(id,accion){
+async function cargarConversacion(id,silencioso){
+  try{
+    const response=await fetch('/api/inbox/'+id,{cache:'no-store',headers:{'Accept':'application/json'}});
+    if(!response.ok) throw new Error('HTTP '+response.status);
+    const data=await response.json();
+    const conv=data.conversacion;
+    if(!conv) return;
+    conversacionActivaId=id;
+    document.getElementById('thread-empty').style.display='none';
+    document.getElementById('thread-view').style.display='flex';
+    document.getElementById('thread-header-name').textContent=conv.nombreContacto||conv.identificador;
+    document.getElementById('thread-header-meta').textContent=(CANAL_LABEL[conv.canal]||conv.canal)+' · '+conv.identificador;
+    renderMensajes(conv.mensajes);
+    const sug=document.getElementById('thread-ai-suggestion');
+    if(conv.sugerenciaIA){
+      sug.style.display='block';
+      document.getElementById('ai-textarea').value=conv.sugerenciaIA;
+    } else {
+      sug.style.display='none';
+    }
+    const tagsBox=document.getElementById('thread-tags-list');
+    tagsBox.innerHTML=(conv.etiquetas||[]).map(function(t){return '<span class="thread-tag">'+escapeHtml(t)+'</span>';}).join('')||'<span style="color:#6f6f7a;font-size:11px">Sin etiquetas</span>';
+    if(!silencioso){
+      document.getElementById('sidebar').classList.add('hidden-mobile');
+      document.getElementById('thread').classList.add('active-mobile');
+    }
+    renderLista();
+  }catch(error){
+    console.error('[inbox:conversacion]',{message:String(error&&error.message||error),at:new Date().toISOString()});
+  }
+}
+document.getElementById('conv-list').addEventListener('click',function(e){
+  const row=e.target.closest('.conv-row');
+  if(!row) return;
+  cargarConversacion(Number(row.getAttribute('data-id')));
+});
+document.getElementById('thread-back').addEventListener('click',function(){
+  document.getElementById('sidebar').classList.remove('hidden-mobile');
+  document.getElementById('thread').classList.remove('active-mobile');
+});
+async function enviarTexto(texto,accion){
   const token=getToken();
   if(!token){document.getElementById('global-status').textContent='Guarda el token del CEO primero.';return;}
-  const textarea=document.getElementById('sug-'+id);
-  const texto=textarea?textarea.value:'';
+  if(!conversacionActivaId) return;
   document.getElementById('global-status').textContent='Enviando...';
   try{
-    const response=await fetch('/api/inbox/'+id+'/respuesta',{method:'POST',headers:{'Content-Type':'application/json','x-ceo-token':token},body:JSON.stringify({accion:accion,texto:texto})});
+    const response=await fetch('/api/inbox/'+conversacionActivaId+'/respuesta',{method:'POST',headers:{'Content-Type':'application/json','x-ceo-token':token},body:JSON.stringify({accion:accion||'editar',texto:texto})});
     const data=await response.json();
     if(!response.ok) throw new Error(data.error||'Error al enviar');
     document.getElementById('global-status').textContent=accion==='descartar'?'Sugerencia descartada.':'Respuesta enviada.';
     refreshInbox();
+    cargarConversacion(conversacionActivaId,true);
   }catch(e){
     document.getElementById('global-status').textContent='Error: '+e.message;
   }
 }
+document.getElementById('ai-aprobar').addEventListener('click',function(){enviarTexto(document.getElementById('ai-textarea').value,'aprobar');});
+document.getElementById('ai-editar').addEventListener('click',function(){enviarTexto(document.getElementById('ai-textarea').value,'editar');});
+document.getElementById('ai-descartar').addEventListener('click',function(){enviarTexto('','descartar');});
+document.getElementById('composer-send').addEventListener('click',function(){
+  const input=document.getElementById('composer-input');
+  const texto=input.value.trim();
+  if(!texto) return;
+  input.value='';
+  enviarTexto(texto,'editar');
+});
+document.getElementById('composer-input').addEventListener('keydown',function(e){
+  if(e.key==='Enter'){document.getElementById('composer-send').click();}
+});
+document.getElementById('thread-tag-add').addEventListener('click',async function(){
+  const token=getToken();
+  if(!token){document.getElementById('global-status').textContent='Guarda el token del CEO primero.';return;}
+  if(!conversacionActivaId) return;
+  const input=document.getElementById('thread-tag-input');
+  const etiqueta=(input.value||'').trim();
+  if(!etiqueta) return;
+  await fetch('/api/inbox/'+conversacionActivaId+'/etiquetas',{method:'POST',headers:{'Content-Type':'application/json','x-ceo-token':token},body:JSON.stringify({etiqueta:etiqueta})});
+  input.value='';
+  refreshInbox();
+  cargarConversacion(conversacionActivaId,true);
+});
 document.getElementById('filter-row').addEventListener('click',function(e){
   const chip=e.target.closest('.filter-chip');
   if(!chip) return;
@@ -3557,12 +3681,14 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await readBody(req);
       const payload = JSON.parse(body || '{}');
+      const fechaCitaMs = Date.parse(String(payload.fechaHoraIso || ''));
       conv.auditoria = {
         nombre: sanitizeSpanishText(String(payload.nombre || '')).slice(0, 120),
         telefono: String(payload.telefono || '').slice(0, 40),
         email: String(payload.email || '').slice(0, 160),
         tipoServicio: sanitizeSpanishText(String(payload.tipoServicio || '')).slice(0, 200),
         fecha: Date.now(),
+        fechaCitaIso: Number.isFinite(fechaCitaMs) ? new Date(fechaCitaMs).toISOString() : null,
       };
       if (!conv.etiquetas.includes('auditoria-solicitada')) conv.etiquetas.push('auditoria-solicitada');
       conv.updatedAt = Date.now();
