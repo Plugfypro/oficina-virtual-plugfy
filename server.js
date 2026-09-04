@@ -39,12 +39,16 @@ function parseCookies(req) {
   return out;
 }
 
-// Para endpoints de LECTURA llamados tanto por el navegador (sesion) como por
-// automatizaciones de servidor a servidor (n8n, etc. -- nunca tienen cookie
-// de sesion). Acepta cualquiera de los dos. Las paginas HTML y el WebSocket
-// siguen siendo solo-sesion (isLoggedIn), nunca deben aceptar el token.
+// Para endpoints de LECTURA llamados tanto por el navegador (sesion o token
+// del CEO) como por automatizaciones de servidor a servidor (n8n, etc. --
+// nunca tienen cookie de sesion). Acepta cualquiera de los tres. El panel
+// real solo usa el token del CEO (isAuthorized) -- exigir ademas una sesion
+// por cookie que el frontend nunca establece dejaba estos endpoints
+// devolviendo 401 en silencio (metricas, flyers, auditorias, reportes...).
+// Las paginas HTML y el WebSocket siguen siendo solo-sesion (isLoggedIn).
 function isLoggedInOrAutomation(req) {
   if (isLoggedIn(req)) return true;
+  if (isAuthorized(req)) return true;
   if (!heartbeatToken) return false;
   return req.headers['x-heartbeat-token'] === heartbeatToken;
 }
@@ -178,9 +182,16 @@ const socialExecutions = [];
 const workExecutions = [];
 const reportes = [];
 const reportesDir = path.join(path.dirname(dataFile), 'reportes');
+const auditorias = [];
+const auditoriasDir = path.join(path.dirname(dataFile), 'auditorias');
 const conversaciones = [];
 const flyers = [];
+const gmbPosts = [];
 const calendario = [];
+const planSemanalIA = { lunes: [], martes: [], miercoles: [], jueves: [], viernes: [], sabado: [], domingo: [] };
+const tareasManuales = { lunes: [], martes: [], miercoles: [], jueves: [], viernes: [], sabado: [], domingo: [] };
+const DIAS_SEMANA = ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado', 'domingo'];
+const serviciosPrecios = [];
 const N8N_INBOX_WEBHOOK_URL = String(process.env.N8N_INBOX_WEBHOOK_URL || '');
 const N8N_INBOX_TOKEN = String(process.env.N8N_INBOX_TOKEN || '');
 const N8N_FLYER_PUBLICAR_URL = String(process.env.N8N_FLYER_PUBLICAR_URL || '');
@@ -203,10 +214,15 @@ let nextInstructionId = 1;
 let nextSocialExecutionId = 1;
 let nextWorkExecutionId = 1;
 let nextReporteId = 1;
+let nextAuditoriaId = 1;
 let nextConversacionId = 1;
 let nextMensajeId = 1;
 let nextFlyerId = 1;
+let nextGmbPostId = 1;
 let nextCalendarioId = 1;
+let nextPlanIaId = 1;
+let nextTareaManualId = 1;
+let nextServicioId = 1;
 
 const TEAM_RESOURCES = {
   community: [
@@ -338,6 +354,10 @@ function loadState() {
       reportes.splice(0, reportes.length, ...parsed.reportes);
       nextReporteId = (reportes.at(-1)?.id || 0) + 1;
     }
+    if (Array.isArray(parsed.auditorias)) {
+      auditorias.splice(0, auditorias.length, ...parsed.auditorias);
+      nextAuditoriaId = (auditorias.at(-1)?.id || 0) + 1;
+    }
     if (Array.isArray(parsed.conversaciones)) {
       conversaciones.splice(0, conversaciones.length, ...parsed.conversaciones);
       nextConversacionId = Math.max(0, ...conversaciones.map((c) => c.id || 0)) + 1;
@@ -347,9 +367,33 @@ function loadState() {
       flyers.splice(0, flyers.length, ...parsed.flyers);
       nextFlyerId = Math.max(0, ...flyers.map((f) => f.id || 0)) + 1;
     }
+    if (Array.isArray(parsed.gmbPosts)) {
+      gmbPosts.splice(0, gmbPosts.length, ...parsed.gmbPosts);
+      nextGmbPostId = Math.max(0, ...gmbPosts.map((p) => p.id || 0)) + 1;
+    }
     if (Array.isArray(parsed.calendario)) {
       calendario.splice(0, calendario.length, ...parsed.calendario);
       nextCalendarioId = Math.max(0, ...calendario.map((c) => c.id || 0)) + 1;
+    }
+    if (parsed.planSemanalIA && typeof parsed.planSemanalIA === 'object') {
+      let maxId = 0;
+      for (const dia of DIAS_SEMANA) {
+        planSemanalIA[dia] = Array.isArray(parsed.planSemanalIA[dia]) ? parsed.planSemanalIA[dia] : [];
+        for (const it of planSemanalIA[dia]) maxId = Math.max(maxId, it.id || 0);
+      }
+      nextPlanIaId = maxId + 1;
+    }
+    if (parsed.tareasManuales && typeof parsed.tareasManuales === 'object') {
+      let maxId = 0;
+      for (const dia of DIAS_SEMANA) {
+        tareasManuales[dia] = Array.isArray(parsed.tareasManuales[dia]) ? parsed.tareasManuales[dia] : [];
+        for (const it of tareasManuales[dia]) maxId = Math.max(maxId, it.id || 0);
+      }
+      nextTareaManualId = maxId + 1;
+    }
+    if (Array.isArray(parsed.serviciosPrecios) && parsed.serviciosPrecios.length) {
+      serviciosPrecios.splice(0, serviciosPrecios.length, ...parsed.serviciosPrecios);
+      nextServicioId = Math.max(0, ...serviciosPrecios.map((s) => s.id || 0)) + 1;
     }
     if (Array.isArray(parsed.agents)) {
       agents.clear();
@@ -379,8 +423,13 @@ function saveState() {
       socialExecutions,
       workExecutions,
       reportes,
+      auditorias,
+      planSemanalIA,
+      tareasManuales,
+      serviciosPrecios,
       conversaciones,
       flyers,
+      gmbPosts,
       calendario,
       businessMetrics,
     });
@@ -465,7 +514,7 @@ function publicAgents() {
   return Array.from(agents.values()).map((agent) => sanitizeDeep(agent));
 }
 
-const CANALES_INBOX = new Set(['email', 'whatsapp', 'instagram', 'web', 'voz']);
+const CANALES_INBOX = new Set(['email', 'whatsapp', 'instagram', 'web', 'voz', 'sms']);
 
 function encontrarOCrearConversacion(canal, identificador, nombreContacto) {
   let conv = conversaciones.find((c) => c.canal === canal && c.identificador === identificador);
@@ -591,6 +640,7 @@ function computeMetrics(list = publicAgents()) {
     seo: 0,
     web: 0,
     automatizacion: 0,
+    pentesting: 0,
     operaciones: 0,
   };
 
@@ -613,6 +663,7 @@ function computeMetrics(list = publicAgents()) {
     else if (dep === 'seo') byDepartment.seo += 1;
     else if (dep === 'web') byDepartment.web += 1;
     else if (dep === 'automatizacion') byDepartment.automatizacion += 1;
+    else if (dep === 'pentesting') byDepartment.pentesting += 1;
     else byDepartment.operaciones += 1;
 
     if (detail[agent.state] !== undefined) detail[agent.state] += 1;
@@ -922,7 +973,7 @@ function buildCompletedAutomationExecution(agent, task) {
 function maybeCreateWorkExecutions(entry) {
   const scope = String(entry.scope || '').toLowerCase();
   const target = String(entry.target || '').toLowerCase();
-  const departments = ['community', 'comerciales', 'seo', 'web', 'automatizacion', 'operaciones'];
+  const departments = ['community', 'comerciales', 'seo', 'web', 'automatizacion', 'pentesting', 'operaciones'];
   if (scope === 'global') return departments.map((department) => buildWorkExecution(entry, department));
   if (scope === 'team') {
     const department = departments.includes(target) || target === 'direccion' ? target : null;
@@ -1096,21 +1147,34 @@ const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '');
 const REGLAS_AUTOMATIZACION_REAL = [
   { intento: 'publicar_instagram', descripcion: 'Publicar en el feed de Instagram el siguiente contenido nuevo ya preparado en la cola, para cualquiera de las 4 marcas. NO sirve para Stories, Reels, ni para reutilizar publicaciones antiguas -- eso no existe todavia.', re: /\bpublica(r|d|mos|ndo|lo|los)?\b|\bpubliquen\b/i, path: 'instagram-publicar-trigger-prueba', method: 'GET' },
   { intento: 'publicar_flyer', descripcion: 'Generar y publicar HOY un Flyer (imagen fija) nuevo en Instagram para la marca que toque segun el calendario de contenido, en feed y tambien como Story si el calendario lo indica.', re: /\bflyers?\b/i, path: 'flyer-diario-test', method: 'POST' },
-  { intento: 'publicar_reel', descripcion: 'Generar y publicar HOY un Reel (video corto) nuevo en Instagram para la marca que toque segun el calendario de contenido, en feed y tambien como Story si el calendario lo indica. Reels SI existe y funciona de verdad.', re: /\breels?\b|\bvideos?\b/i, path: 'reel-diario-test', method: 'POST' },
+  { intento: 'publicar_reel', descripcion: 'Generar y publicar HOY un Reel (video corto) nuevo en Instagram Y Facebook para la marca que toque segun el calendario de contenido, en feed y tambien como Story si el calendario lo indica. Reels SI existe y funciona de verdad. Usar esto tambien cuando el CEO pida algo generico como "publicacion en redes sociales" sin especificar formato, ya que es el formato mas completo disponible.', re: /\breels?\b|\bvideos?\b|\bpublicaci[oó]n(es)?\b.*\bredes\b|\bredes\s*sociales\b.*\bpublica/i, path: 'reel-diario-test', method: 'POST' },
   { intento: 'auditoria_seo', descripcion: 'Auditoria semanal de SEO/GEO/AEO de las webs propias.', re: /\bseo\b/i, path: 'seo-auditoria-test', method: 'POST' },
   { intento: 'auditoria_web', descripcion: 'Auditoria de conversion/UX de las webs propias (landing, CTAs, estructura).', re: /\bweb\b/i, path: 'auditoria-web-test', method: 'POST' },
   { intento: 'pentest_seguridad', descripcion: 'Auditoria tecnica de seguridad (cabeceras HTTPS, exposicion de version de WordPress, etc.) de las webs propias y de clientes.', re: /\bpentest\b|\bseguridad\b|\bauditor[ií]a?\s*t[eé]cnica\b/i, path: 'pentest-revisar-ahora', method: 'POST' },
   { intento: 'generar_contenido', descripcion: 'Generar contenido nuevo de texto/copy para redes sociales para las 4 marcas (no genera la imagen, solo el texto).', re: /\bgenerad?\s*contenido\b|\bcontenido\s*nuevo\b/i, path: 'generador-contenido-test', method: 'POST' },
   { intento: 'ideas_virales', descripcion: 'Generar ideas de video/reel con gancho y guion, basadas en formatos probados (no en tendencias en tiempo real).', re: /\bideas?\s*virales?\b/i, path: 'ideas-virales-test', method: 'POST' },
   { intento: 'gmb_contenido', descripcion: 'Generar y preparar publicaciones para las fichas de Google Business de los distintos negocios.', re: /\bgmb\b|\bgoogle\s*business\b|\bficha\s*de\s*google\b/i, path: 'gmb-contenido-test', method: 'POST' },
+  { intento: 'gmb_resumen_diario', descripcion: 'Enviar por email el resumen diario con las publicaciones de Google Business listas para subir manualmente de las 6 empresas (mientras no este conectada la API real de Google Business).', re: /resumen.*google\s*business|google\s*business.*resumen|env.*google\s*business|todos\s*los\s*d[ií]as.*google\s*business/i, path: 'gmb-resumen-diario', method: 'POST' },
   { intento: 'reporte_diario', descripcion: 'Generar el reporte ejecutivo diario para el CEO con el estado de la oficina y las automatizaciones.', re: /\breporte\b/i, path: 'reporte-diario-test', method: 'POST' },
   { intento: 'revisar_correos', descripcion: 'Revisar y clasificar los correos de Gmail pendientes.', re: /\bcorreos?\b|\bgmail\b|\bemails?\b/i, path: 'gmail-revisar-ahora', method: 'POST' },
   { intento: 'plugfyguard_vigilancia', descripcion: 'Vigilancia de seguridad especifica de PlugfyGuard sobre las apps propias (Plugfy panel, Gramflow).', re: /\bplugfyguard\b/i, path: 'plugfyguard-revisar-ahora', method: 'POST' },
+  { intento: 'revisar_errores_n8n', descripcion: 'Revisar de verdad, consultando la API real de n8n, si algun workflow/automatizacion (bot de llamadas, redes, GMB, facturas, etc.) ha fallado en las ultimas 24 horas -- lista cada error real con el workflow, el nodo y el mensaje exacto. Ademas hay un aviso automatico por email cada 2h si aparece un error nuevo, sin que el CEO tenga que preguntar.', re: /\berrores?\b|\bfallos?\b|\bfalla(ndo|r)?\b|\bdiagnostic/i, path: 'revisar-errores-n8n', method: 'POST' },
   { intento: 'vigilancia_alertas', descripcion: 'Vigilancia general 24/7 y alertas sobre el estado de las automatizaciones y sistemas propios.', re: /\balertas?\b|\bvigilancia\b/i, path: 'alertas-test', method: 'POST' },
   { intento: 'auditoria_empresa', descripcion: 'Preparar una auditoria/informe para un cliente o empresa nueva (no una de las 4 marcas propias).', re: /\bauditor[ií]a?\s*(de\s*)?(empresa|cliente)s?\b/i, path: 'auditoria-empresa', method: 'POST' },
+  { intento: 'auditoria_web_cliente', descripcion: 'Auditoria tecnica real de si la web de un cliente (ej. Soiz Estampaciones) funciona bien y esta adaptada a movil/tablet: comprueba paginas clave (inicio, tienda, checkout) de verdad.', re: /auditor[ií]a?.*(funcion|adapt|movil|m[oó]vil|tablet|responsive)|(funcion|adapt|movil|m[oó]vil|tablet|responsive).*auditor[ií]a?/i, path: 'auditoria-web-cliente', method: 'POST' },
   { intento: 'investigacion_redes', descripcion: 'Investigar competencia y tendencias en redes sociales.', re: /\binvestigaci[oó]n\b|\bcompetencia\b/i, path: 'investigacion-redes-test', method: 'POST' },
   { intento: 'briefing_web', descripcion: 'Generar un briefing inicial para un proyecto de web nueva.', re: /\bbriefing\b/i, path: 'web-ia-briefing', method: 'POST' },
   { intento: 'generar_imagen', descripcion: 'Generar la imagen (plantilla HTML/CSS) para el siguiente contenido pendiente de alguna de las 4 marcas.', re: /\bimagen(es)?\b/i, path: 'asset-imagen-prueba', method: 'GET' },
+  { intento: 'reenviar_factura', descripcion: 'Reenviar por email la ultima factura ya generada de un cliente (ej. Soiz Estampaciones), sin generar una factura nueva.', re: /reenv.*factura|factura.*reenv/i, path: 'factura-reenviar-ultima', method: 'POST' },
+  { intento: 'estado_ventas', descripcion: 'Estado real AHORA MISMO del bot de llamadas/ventas: leads pendientes, contactados, citas agendadas, llamadas hechas hoy, categorias con mas pendientes. Datos reales consultados en directo a la base de datos, no un resumen preparado de antemano.', re: /\bventas?\b|\bllamadas?\b|\bleads?\b|\bcomercial(es)?\b|\bciti?as?\b/i, path: 'estado-ventas-real', method: 'GET' },
+  { intento: 'propuesta_auditoria', descripcion: 'Cadena completa auditoria->copy->ventas: coge el hallazgo REAL mas reciente de una auditoria tecnica/web ya realizada y escribe un argumento de venta especifico para presentarselo a ese cliente, en vez de un texto generico. Distinto de auditoria_web/auditoria_seo (que generan la auditoria en si) -- esto convierte una auditoria ya hecha en una propuesta real.', re: /\bpropuesta\b.*\bauditor[ií]a\b|\bargumento\b.*\bauditor[ií]a\b|\bvender\b.*\bauditor[ií]a\b/i, path: 'propuesta-auditoria-real', method: 'POST' },
+  { intento: 'copy_con_investigacion', descripcion: 'Cadena completa research->copy: investiga de verdad en internet el tema/sector pedido y LUEGO escribe un texto de venta apoyado en esos hallazgos reales (datos, cifras, fuentes), en vez de argumentos genericos inventados. Usar cuando pidan copy que se apoye en datos reales o investigacion de sector/competencia.', re: /\bcopy\b.*\binvestigaci[oó]n\b|\btexto\b.*\bcon\s*datos\s*reales\b|\bargumentos?\s*reales?\b.*\bventa\b/i, path: 'copy-con-investigacion-real', method: 'POST' },
+  { intento: 'propuesta_lead', descripcion: 'Cadena completa scraper->copy->ventas: coge un lead REAL de la cola (el que se nombre, o el siguiente pendiente) y escribe un mensaje de primer contacto real y personalizado (WhatsApp) usando sus datos reales (categoria, ciudad), listo para que ventas lo envie. Distinto de copy_bajo_demanda (que es un texto suelto sin lead real detras) y de lanzar_llamadas (que llama por telefono, no escribe mensaje).', re: /\bpropuesta\b.*\blead\b|\bmensaje\b.*\blead\b|\bcontacta(r)?\b.*\blead\b|primer\s*contacto/i, path: 'propuesta-lead-real', method: 'POST' },
+  { intento: 'copy_bajo_demanda', descripcion: 'Escribir AHORA un texto/copy concreto bajo demanda (hook, titular, texto de venta, caption suelto...) para un uso puntual, distinto del contenido diario automatico de las 4 marcas.', re: /\bescribe(me)?\b.*\b(texto|hook|copy|titular|frase)\b|\bredacta(me)?\b/i, path: 'copy-bajo-demanda-real', method: 'POST' },
+  { intento: 'investigar_competidor', descripcion: 'Investigar AHORA en internet a un competidor o sector concreto: fortalezas, debilidades y oportunidades reales, con fuentes. Distinto de investigacion_redes (que es para el calendario interno de contenido) -- esto es un analisis competitivo legible para el CEO.', re: /\binvestiga(r)?\b.*\bcompetenci|\banaliza(r)?\b.*\bcompetidor|\bcompetidor(es)?\b.*\b(analiza|investiga)/i, path: 'investigar-competidor-real', method: 'POST' },
+  { intento: 'estado_auditorias', descripcion: 'Estado real AHORA MISMO de las auditorias gratuitas solicitadas por clientes potenciales via WhatsApp: cuantas hay, cuantas tienen cita confirmada, cuantas siguen sin agendar, proximas citas. Datos reales del inbox, no inventados.', re: /\bauditor[ií]as?\s*(pendiente|solicitad|agend)|\bcuantas?\s*auditor[ií]as?\b|estado.*auditor[ií]as?/i, path: 'auditorias-estado-real', method: 'GET' },
+  { intento: 'lanzar_llamadas', descripcion: 'Disparar AHORA un lote real de llamadas salientes del bot de ventas (a los leads pendientes segun la cola real, respetando el limite diario ya configurado). Distinto de estado_ventas: esto EJECUTA llamadas de verdad, no solo consulta cifras.', re: /\b(lanza|dispara|empieza|inicia)\b.*\bllama/i, path: 'lanzar-llamadas-real', method: 'POST' },
+  { intento: 'metricas_redes', descripcion: 'Metricas REALES de las ultimas publicaciones de Instagram (alcance, vistas, likes, comentarios) de las 2 cuentas, consultadas en directo a la API de Instagram ahora mismo. No es el calendario de contenido ni el catalogo de automatizaciones, son resultados reales de rendimiento.', re: /m[eé]tricas?\b|\brendimiento\b|\bresultados?\s*(de\s*)?(redes|contenido|posts?|publicaciones)\b|\balcance\b|\bengagement\b|c[oó]mo\s*(va|van|est[aá]n?)\s*(las\s*)?redes/i, path: 'metricas-redes-real', method: 'GET' },
 ];
 
 // Clasificador por IA: en vez de exigir que el CEO escriba exactamente la
@@ -1121,7 +1185,7 @@ const REGLAS_AUTOMATIZACION_REAL = [
 // deja explicito.
 async function clasificarAutomatizacionesConIA(mensaje) {
   const catalogo = REGLAS_AUTOMATIZACION_REAL.map((r) => `- ${r.intento}: ${r.descripcion}`).join('\n');
-  const systemPrompt = `Eres el clasificador de ordenes del CEO de una agencia de marketing. Tienes este catalogo de automatizaciones REALES disponibles (y solo estas, ninguna mas):\n${catalogo}\n\nDado el mensaje del CEO, devuelve SOLO un JSON con la forma {"intentos": ["nombre_intento", ...]} listando los intentos del catalogo que la orden pide ejecutar AHORA. Puede haber varios, uno, o ninguno. Si la orden pide algo que no esta en el catalogo (por ejemplo Stories, Reels, reutilizar publicaciones antiguas, o cualquier accion de un departamento sin automatizacion real como ventas/comerciales), NO inventes una coincidencia -- devuelve un array vacio para esa parte. No expliques nada, solo el JSON.`;
+  const systemPrompt = `Eres el clasificador de ordenes del CEO de una agencia de marketing. Tienes este catalogo de automatizaciones REALES disponibles (y solo estas, ninguna mas):\n${catalogo}\n\nDado el mensaje del CEO, devuelve SOLO un JSON con la forma {"intentos": ["nombre_intento", ...]} listando los intentos del catalogo que la orden pide ejecutar AHORA, de forma explicita y clara. Puede haber varios, uno, o ninguno.\n\nSe muy estricto -- ante la duda, deja el array vacio. En concreto:\n- Una pregunta de charla o de estado general ("como vamos", "que tal", "algun problema", "todo bien por ahi") NO es una orden de ejecutar nada, aunque el catalogo tenga un intento parecido (ej. reporte_diario) -- eso solo cuenta si el CEO pide explicitamente el reporte/informe/resumen en si (ej. "mandame el reporte diario", "generame el informe").\n- Si la orden pide algo que no esta en el catalogo (por ejemplo Stories, Reels, reutilizar publicaciones antiguas, o cualquier otra cosa sin un intento correspondiente en la lista de arriba), NO inventes una coincidencia -- devuelve un array vacio para esa parte. Revisa bien la lista completa antes de descartar algo, puede haber cambiado recientemente.\nNo expliques nada, solo el JSON.`;
 
   const respuesta = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -1146,6 +1210,36 @@ async function clasificarAutomatizacionesConIA(mensaje) {
   return (parsed.intentos || []).filter((i) => validos.has(i));
 }
 
+async function responderChatCEO(mensaje, historial) {
+  const catalogo = REGLAS_AUTOMATIZACION_REAL.map((r) => `- ${r.intento}: ${r.descripcion}`).join('\n');
+  const systemPrompt = `Eres el asistente de soporte del CEO de Virtual Marketing Spain (agencia de marketing digital) y de su agencia de automatizaciones con IA. Hablas siempre en espanol, de forma directa y practica, como un compañero de confianza que ayuda a resolver imprevistos del dia a dia.
+
+Estas integrado en el panel privado de la oficina virtual (Miniverse). Conoces el catalogo REAL de automatizaciones ya disponibles en esta oficina (las unicas que existen de verdad, no hay mas):
+${catalogo}
+
+Si el CEO te pregunta si algo se puede hacer, responde con honestidad segun este catalogo real -- si no esta en la lista, dilo claramente en vez de inventar que existe. Si te pide ayuda para diagnosticar un problema tecnico (una web, un plugin, un pedido que falla, etc.), da pasos concretos y accionables basados en lo que te cuenta, pero deja claro que tu no tienes acceso a servidores ni puedes ejecutar comandos por tu cuenta -- para eso esta Claude Code en otra sesion. Tu funcion aqui es responder dudas, orientar y dar soporte conversacional dentro del panel, no ejecutar acciones. Se breve y util, no des rodeos.`;
+
+  const messages = [{ role: 'system', content: systemPrompt }];
+  for (const turno of (historial || []).slice(-10)) {
+    if (turno && turno.role && turno.content) {
+      messages.push({ role: turno.role === 'ai' ? 'assistant' : 'user', content: String(turno.content).slice(0, 4000) });
+    }
+  }
+  messages.push({ role: 'user', content: String(mensaje).slice(0, 4000) });
+
+  const respuesta = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    signal: AbortSignal.timeout(30000),
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: JSON.stringify({ model: 'gpt-4o-mini', temperature: 0.5, messages }),
+  });
+
+  if (!respuesta.ok) throw new Error(`OpenAI respondio ${respuesta.status}`);
+  const data = await respuesta.json();
+  const contenido = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+  return contenido || 'No he podido generar una respuesta ahora mismo.';
+}
+
 async function dispararAutomatizacionReal(entry) {
   const texto = entry.message || '';
   let intentosDetectados;
@@ -1167,7 +1261,12 @@ async function dispararAutomatizacionReal(entry) {
   const resultados = [];
   for (const regla of reglas) {
     try {
-      const respuesta = await fetch(N8N_BASE + regla.path, { method: regla.method || 'GET', signal: AbortSignal.timeout(30000) });
+      const opciones = { method: regla.method || 'GET', signal: AbortSignal.timeout(30000) };
+      if (opciones.method === 'POST') {
+        opciones.headers = { 'Content-Type': 'application/json' };
+        opciones.body = JSON.stringify({ tema: texto });
+      }
+      const respuesta = await fetch(N8N_BASE + regla.path, opciones);
       let cuerpo = null;
       try { cuerpo = await respuesta.json(); } catch { /* sin cuerpo JSON, no pasa nada */ }
       resultados.push({ intento: regla.intento, disparado: true, ok: respuesta.ok, statusHttp: respuesta.status, respuesta: cuerpo, deteccion: fuente });
@@ -1176,6 +1275,118 @@ async function dispararAutomatizacionReal(entry) {
     }
   }
   return resultados;
+}
+
+// Traduce la respuesta REAL (JSON) de una automatizacion a una frase que el
+// CEO pueda leer directamente en el chat, en vez de solo el nombre del
+// intento -- para que "revisa los errores" conteste con los errores reales,
+// no con un "vale, enviado" vacio.
+function resumirResultadoAutomatizacion(r) {
+  const cuerpo = r.respuesta;
+  if (!cuerpo) return null;
+  if (r.intento === 'revisar_errores_n8n') {
+    if (!cuerpo.hayErrores) return 'no hay ningun error real en las ultimas 24h en n8n, todo correcto';
+    const lista = (cuerpo.errores || []).slice(0, 5).map((e) => {
+      const det = e.detalle || {};
+      return `${e.workflow || '?'}${det.nodo ? ' (' + det.nodo + ')' : ''}: ${det.mensaje || 'error sin detalle'}`;
+    }).join(' | ');
+    const extra = cuerpo.totalErrores > 5 ? ` y ${cuerpo.totalErrores - 5} más` : '';
+    return `se han encontrado ${cuerpo.totalErrores} error(es) real(es) en las últimas 24h: ${lista}${extra}`;
+  }
+  if (r.intento === 'estado_ventas') {
+    const e = cuerpo.por_estado || {};
+    const grandes = cuerpo.pendientes_empresas_grandes || 0;
+    const top = (cuerpo.top_categorias_pendientes || []).slice(0, 3).map((c) => `${c.categoria} (${c.total})`).join(', ');
+    return `ahora mismo hay ${e.pendiente || 0} leads pendientes de llamar, ${e.contactado || 0} ya contactados y ${e.cita_agendada || 0} cita(s) agendada(s) en total. Hoy se han hecho ${cuerpo.llamadas_intentadas_hoy || 0} llamadas y ${cuerpo.citas_agendadas_hoy || 0} citas nuevas. De empresas grandes quedan ${grandes} pendientes. Las categorías con más pendientes son: ${top || 'sin datos'}.`;
+  }
+  if (r.intento === 'propuesta_auditoria') {
+    if (!cuerpo.ok) return `no se ha podido preparar la propuesta: ${cuerpo.error}`;
+    return `cadena auditoría->copy completa -> hallazgo real: "${(cuerpo.hallazgoReal || '').slice(0, 150)}..." -> propuesta lista: "${cuerpo.texto}"`;
+  }
+  if (r.intento === 'copy_con_investigacion') {
+    return `cadena research->copy completa -> hallazgos reales: "${(cuerpo.hallazgos || '').slice(0, 200)}..." -> texto final: "${cuerpo.texto}"`;
+  }
+  if (r.intento === 'propuesta_lead') {
+    if (!cuerpo.ok) return `no se ha podido preparar la propuesta: ${cuerpo.error || 'sin lead disponible'}`;
+    const l = cuerpo.lead || {};
+    return `cadena completa: lead real "${l.nombre}" (${l.categoria}, ${l.ciudad}) -> mensaje listo -> "${cuerpo.mensaje}"`;
+  }
+  if (r.intento === 'copy_bajo_demanda') {
+    return `texto listo -> "${cuerpo.texto || 'no se pudo generar'}"`;
+  }
+  if (r.intento === 'investigar_competidor') {
+    return `análisis real completado -> ${cuerpo.texto || 'no se pudo completar la investigación'}`;
+  }
+  if (r.intento === 'estado_auditorias') {
+    const proximas = (cuerpo.proximasCitas || []).map((c) => `${c.nombre} (${c.tipo}) el ${new Date(c.fecha).toLocaleString('es-ES')}`).join('; ');
+    return `hay ${cuerpo.totalSolicitadas || 0} auditoría(s) gratuita(s) solicitada(s) por WhatsApp en total, ${cuerpo.conCitaConfirmada || 0} con cita ya confirmada y ${cuerpo.sinCitaTodavia || 0} todavía sin agendar. ${proximas ? 'Próximas: ' + proximas + '.' : 'Sin próximas citas confirmadas.'}`;
+  }
+  if (r.intento === 'lanzar_llamadas') {
+    if (cuerpo.primer_error && !cuerpo.llamadas) return `no se ha podido lanzar el lote: ${cuerpo.primer_error}`;
+    return `lote real lanzado: ${cuerpo.llamadas || 0} llamada(s) iniciada(s) de verdad ahora mismo${cuerpo.errores ? `, ${cuerpo.errores} con error` : ''}.`;
+  }
+  if (r.intento === 'metricas_redes') {
+    const partes = (cuerpo.cuentas || []).map((c) => {
+      if (c.error) return `${c.cuenta}: error consultando (${c.error})`;
+      const posts = c.ultimosPosts || [];
+      if (!posts.length) return `${c.cuenta}: sin publicaciones recientes o sin datos`;
+      const p = posts[0];
+      const media = posts.reduce((s, x) => s + (x.alcance || 0), 0) / posts.length;
+      return `${c.cuenta}: última pieza (${p.tipo}, ${p.fecha.slice(0, 10)}) con ${p.alcance} de alcance y ${p.vistas} vistas; media de las últimas ${posts.length} publicaciones: ${media.toFixed(1)} de alcance`;
+    });
+    return `métricas reales ahora mismo -> ${partes.join(' | ')}`;
+  }
+  return null;
+}
+
+// Respuesta natural "en persona": cuando el CEO le habla a un trabajador o
+// equipo concreto y la orden NO coincide con ninguna automatizacion real
+// (dispararAutomatizacionReal), en vez de la frase generica de siempre se le
+// pide a la IA que conteste como esa persona/equipo -- pero siempre anclada
+// al catalogo real, nunca inventando cifras o trabajo que no existe. Si la
+// pregunta encaja con algo real, la IA debe decirlo y sugerir disparar esa
+// automatizacion (el CEO puede volver a escribir la orden que coincida).
+async function responderComoTrabajador(entry, department) {
+  const catalogo = REGLAS_AUTOMATIZACION_REAL.map((r) => `- ${r.intento}: ${r.descripcion}`).join('\n');
+  let persona;
+  if (entry.scope === 'worker') {
+    const agent = publicAgents().find((item) => String(item.agent) === String(entry.target));
+    persona = agent ? `Eres ${agent.name || agent.agent}, del equipo de ${department || 'operaciones'} de la oficina.` : `Eres un trabajador del equipo de ${department || 'operaciones'}.`;
+  } else if (entry.scope === 'team') {
+    persona = `Hablas en nombre del equipo de ${department || entry.target} al completo.`;
+  } else {
+    persona = 'Hablas en nombre de toda la oficina.';
+  }
+
+  const systemPrompt = `${persona} Trabajas para Virtual Marketing Spain (agencia de marketing digital) y su agencia de automatizaciones con IA. Te acaba de escribir el CEO por el chat interno de la oficina. Responde en espanol, en primera persona, breve y natural, como lo haria un compañero de verdad -- no como un bot generico.
+
+Catalogo REAL de automatizaciones ya conectadas en esta oficina (las unicas que existen de verdad):
+${catalogo}
+
+Reglas:
+- Si lo que pregunta el CEO SI encaja con algo del catalogo, dilo con naturalidad y anima a que lo lance (ej: "eso te lo puedo comprobar ahora mismo, dime 'revisa los errores' y lo disparo"). No hace falta repetir el nombre tecnico del intento.
+- Si pregunta algo de tu puesto para lo que NO hay automatizacion real conectada (ej. cifras en vivo que no se guardan en ningun sitio consultable), se honesto: di que no tienes ese dato en tiempo real todavia, y si existe una accion real relacionada del catalogo, ofrecela como alternativa. Nunca inventes numeros ni cuentes trabajo como hecho si no lo es.
+- No hables de "steps", "workExecutions" ni de ningun progreso simulado -- eso no existe para el CEO, solo existe lo real.
+- Se breve: 2-4 frases como mucho.`;
+
+  const respuesta = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    signal: AbortSignal.timeout(20000),
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      temperature: 0.6,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: String(entry.message || '').slice(0, 500) },
+      ],
+    }),
+  });
+  if (!respuesta.ok) throw new Error(`OpenAI respondio ${respuesta.status}`);
+  const data = await respuesta.json();
+  const contenido = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+  if (!contenido) throw new Error('OpenAI sin contenido');
+  return contenido;
 }
 
 async function pushInstruction(payload) {
@@ -1217,15 +1428,34 @@ async function pushInstruction(payload) {
   // "si") en vez de quedar en silencio.
   let respuestaInmediata;
   if (automatizacionReal && automatizacionReal.length) {
-    const exitosas = automatizacionReal.filter((r) => r.ok).map((r) => r.intento);
+    const exitosas = automatizacionReal.filter((r) => r.ok);
     const fallidas = automatizacionReal.filter((r) => !r.ok);
     const partes = [];
-    if (exitosas.length) partes.push(`se ha enviado a la automatización real: ${exitosas.join(', ')}`);
+    if (exitosas.length) {
+      partes.push(`se ha enviado a la automatización real: ${exitosas.map((r) => r.intento).join(', ')}`);
+      for (const r of exitosas) {
+        const resumen = resumirResultadoAutomatizacion(r);
+        if (resumen) partes.push(resumen);
+      }
+    }
     if (fallidas.length) partes.push(`ha fallado al intentar: ${fallidas.map((r) => r.intento + ' (' + (r.error || 'error ' + r.statusHttp) + ')').join(', ')}`);
     respuestaInmediata = 'Vale, recibido. La orden ' + partes.join('; y ') + '.';
   } else {
-    respuestaInmediata = 'Vale, recibido. Esta orden concreta todavía no coincide con ninguna automatización real conectada — queda registrada, pero el trabajo de los equipos de abajo es una simulación visual, no ejecución real.';
+    let department = null;
+    if (entry.scope === 'worker') {
+      const agent = publicAgents().find((item) => String(item.agent) === String(entry.target));
+      department = agent ? inferDepartment(agent) : null;
+    } else if (entry.scope === 'team') {
+      department = entry.target;
+    }
+    try {
+      respuestaInmediata = await responderComoTrabajador(entry, department);
+    } catch (err) {
+      respuestaInmediata = 'Vale, recibido. Esta orden concreta todavía no coincide con ninguna automatización real conectada — queda registrada, pero el trabajo de los equipos de abajo es una simulación visual, no ejecución real.';
+    }
   }
+  entry.respuesta = respuestaInmediata;
+  saveState();
   return { instruction: entry, socialExecution: socialExecution || null, workExecutions: workExecutions || [], automatizacionReal, respuestaInmediata };
 }
 
@@ -1314,7 +1544,13 @@ function renderStatusHtml() {
     .links{display:flex;gap:12px;flex-wrap:wrap;margin-top:20px}
     a{color:#111;background:#d4af37;padding:10px 14px;border-radius:999px;text-decoration:none;font-weight:700}
     code{display:block;margin-top:18px;padding:14px;background:#10131b;border-radius:14px;color:#ddd;white-space:pre-wrap}
-  </style>
+  .plantilla-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-top:10px}
+.plantilla-item{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:10px 12px;cursor:pointer;transition:.15s}
+.plantilla-item:hover{border-color:rgba(212,175,55,.4);background:rgba(212,175,55,.06)}
+.plantilla-label{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:#d4af37;font-weight:800;margin-bottom:5px}
+.plantilla-texto{font-size:12.5px;color:#f3f3f5;line-height:1.5}
+.plantilla-item.copiado{border-color:#23d18b}
+</style>
 </head>
 <body>
   <div class="box">
@@ -1336,11 +1572,13 @@ function renderStatusHtml() {
 function inferDepartment(agent) {
   const text = `${agent.agent || ''} ${agent.name || ''}`.toLowerCase();
   if (/(director|ceo|gerencia|admin)/.test(text)) return 'direccion';
+  if (/(scraper|scrape)/.test(text)) return 'scraper';
   if (/(community|social|redes|instagram|tiktok|youtube|content)/.test(text)) return 'community';
   if (/(comercial|ventas|sales|closer|lead)/.test(text)) return 'comerciales';
   if (/(seo|geo|aeo|sem|posicionamiento)/.test(text)) return 'seo';
   if (/(web|developer|dev|frontend|backend|wordpress|diseño|design)/.test(text)) return 'web';
   if (/(automat|n8n|bot|chatbot|ia|ai|workflow)/.test(text)) return 'automatizacion';
+  if (/(pentest|seguridad|security)/.test(text)) return 'pentesting';
   return 'operaciones';
 }
 
@@ -1402,7 +1640,7 @@ h1{margin:0 0 14px;font-size:clamp(32px,4vw,56px);line-height:.95}
 .event-line{padding:12px 14px;border-radius:16px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06)}
 .event-line strong{display:block;font-size:13px;margin-bottom:4px}
 .event-line span{color:#a9a9b4;font-size:12px;line-height:1.45}
-.command-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px}
+.command-grid{display:grid;grid-template-columns:1fr;gap:18px;margin-bottom:18px}
 .command-card{padding:18px}
 .command-card h3{margin:0 0 14px;font-size:20px}
 .field{display:grid;gap:8px;margin-bottom:12px}
@@ -1501,11 +1739,11 @@ h1{margin:0 0 14px;font-size:clamp(32px,4vw,56px);line-height:.95}
 .dot.working{background:#23d18b}.dot.idle{background:#f0b94f}.dot.thinking{background:#d77dff}.dot.speaking{background:#57c7ff}.dot.error{background:#ff6467}.dot.sleeping{background:#8794ff}.dot.offline{background:#666a73}
 .task{color:#a5a5b0;font-size:12px;line-height:1.5;min-height:36px}
 .desk-empty{display:grid;place-items:center;color:#767684;font-size:13px;min-height:130px;border:1px dashed rgba(255,255,255,.1);border-radius:18px}
-.picker-layout{display:grid;grid-template-columns:.95fr 1.05fr;gap:12px}
+.picker-layout{display:grid;grid-template-columns:.5fr 1.5fr;gap:12px}
 .target-panel{padding:12px 14px;border-radius:16px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06)}
 .target-panel h5{margin:0 0 10px;font-size:13px;color:#d9d9e2}
 .target-select{width:100%;border:1px solid rgba(255,255,255,.08);background:rgba(10,10,14,.88);color:#f4f4f7;border-radius:14px;padding:12px 14px;font:inherit}
-.target-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;max-height:270px;overflow:auto;padding-right:4px}
+.target-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;max-height:560px;overflow:auto;padding-right:4px}
 .target-card{border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);color:#f4f4f7;border-radius:16px;padding:12px;cursor:pointer;text-align:left;display:grid;gap:8px;transition:.15s ease}
 .target-card:hover{border-color:rgba(212,175,55,.35);background:rgba(212,175,55,.08)}
 .target-card.active{border-color:rgba(212,175,55,.5);background:rgba(212,175,55,.12);box-shadow:0 0 0 1px rgba(212,175,55,.15) inset}
@@ -1598,6 +1836,7 @@ h1{margin:0 0 14px;font-size:clamp(32px,4vw,56px);line-height:.95}
         <a class="btn-gold" href="/operations" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Abrir operaciones</a>
         <a class="btn-gold" href="/manual" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Manual operativo</a>
         <a class="btn-gold" href="/inbox" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Inbox unificado</a>
+        <a class="btn-gold" href="/calendario-semanal" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Calendario semanal</a>
         <a class="btn-dark" href="/logout" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center">Cerrar sesión</a>
       </div>
     </div>
@@ -1670,6 +1909,17 @@ h1{margin:0 0 14px;font-size:clamp(32px,4vw,56px);line-height:.95}
       <div id="command-reply"></div>
     </div>
     <div class="panel command-card">
+      <h3>Chat directo con la IA (soporte)</h3>
+      <div class="events-list" id="ceo-chat-log" style="max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;"></div>
+      <div class="field" style="margin-top:10px">
+        <textarea id="ceo-chat-input" placeholder="Pregunta algo o pide ayuda para resolver un imprevisto..." rows="2"></textarea>
+      </div>
+      <div class="button-row">
+        <button class="btn-gold" id="ceo-chat-send">Enviar</button>
+      </div>
+      <div class="command-status" id="ceo-chat-status">Listo para hablar.</div>
+    </div>
+    <div class="panel command-card">
       <h3>Últimas instrucciones</h3>
       <div class="instruction-list" id="instruction-list"></div>
     </div>
@@ -1684,6 +1934,10 @@ h1{margin:0 0 14px;font-size:clamp(32px,4vw,56px);line-height:.95}
     <div class="panel command-card">
       <h3>Flyers pendientes de aprobar</h3>
       <div class="instruction-list" id="flyers-list"></div>
+    </div>
+    <div class="panel command-card">
+      <h3>Google Business — publicar manual (sin API todavia)</h3>
+      <div class="instruction-list" id="gmb-posts-list"></div>
     </div>
   </section>
   <section class="biz-grid">
@@ -1736,19 +1990,23 @@ const ZONES=[
   {key:'direccion',title:'Dirección',tag:'CEO / Control'},
   {key:'community',title:'Community & Redes',tag:'Contenido'},
   {key:'comerciales',title:'Comerciales',tag:'Ventas'},
+  {key:'scraper',title:'Scrapers e Investigación',tag:'Leads'},
   {key:'seo',title:'SEO / GEO / AEO',tag:'Tráfico'},
   {key:'web',title:'Páginas Web',tag:'Conversión'},
   {key:'automatizacion',title:'IA & Automatización',tag:'Escala'},
+  {key:'pentesting',title:'Pentesting / Seguridad',tag:'Seguridad'},
   {key:'operaciones',title:'Operaciones',tag:'Soporte'}
 ];
 function inferDepartment(agent){
   const text=(String(agent.agent||'')+' '+String(agent.name||'')).toLowerCase();
   if (/(director|ceo|gerencia|admin)/.test(text)) return 'direccion';
+  if (/(scraper|scrape)/.test(text)) return 'scraper';
   if (/(community|social|redes|instagram|tiktok|youtube|content)/.test(text)) return 'community';
   if (/(comercial|ventas|sales|closer|lead)/.test(text)) return 'comerciales';
   if (/(seo|geo|aeo|sem|posicionamiento)/.test(text)) return 'seo';
   if (/(web|developer|dev|frontend|backend|wordpress|diseño|design)/.test(text)) return 'web';
   if (/(automat|n8n|bot|chatbot|ia|ai|workflow)/.test(text)) return 'automatizacion';
+  if (/(pentest|seguridad|security)/.test(text)) return 'pentesting';
   return 'operaciones';
 }
 function stateLabel(state){
@@ -1766,7 +2024,8 @@ function eventRow(item){
   return '<div class="event-line"><strong>'+escapeHtml(item.agentId||'agente')+' · '+escapeHtml(type)+(state?' · '+escapeHtml(state):'')+'</strong><span>'+escapeHtml(task)+'</span></div>';
 }
 function instructionRow(item){
-  return '<div class="instruction-line"><strong>'+escapeHtml(item.author||'CEO')+' → '+escapeHtml(item.target||'all')+' · '+escapeHtml(item.scope||'global')+'</strong><span>'+escapeHtml(item.message||'Sin mensaje')+'</span></div>';
+  const respuestaHtml=item.respuesta?('<div style="margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,.08);color:#23d18b;font-size:12px">'+escapeHtml(item.respuesta)+'</div>'):'';
+  return '<div class="instruction-line"><strong>'+escapeHtml(item.author||'CEO')+' → '+escapeHtml(item.target||'all')+' · '+escapeHtml(item.scope||'global')+'</strong><span>'+escapeHtml(item.message||'Sin mensaje')+'</span>'+respuestaHtml+'</div>';
 }
 function reporteRow(item){
   const enlaces='<a href="/reportes/'+encodeURIComponent(item.id)+'.html" target="_blank" style="color:#B8A35A;margin-right:10px">Ver HTML</a>'+(item.tienePdf?'<a href="/reportes/'+encodeURIComponent(item.id)+'.pdf" target="_blank" style="color:#B8A35A">Ver / descargar PDF</a>':'<span style="color:#666">Sin PDF</span>');
@@ -1786,6 +2045,49 @@ function flyerRow(item){
     ?'<div style="margin-top:8px;display:flex;gap:8px"><button class="btn-gold" onclick="aprobarFlyer('+Number(item.id)+')" style="padding:8px 14px;font-size:12px">Aprobar y publicar</button><button class="btn-dark" onclick="descartarFlyer('+Number(item.id)+')" style="padding:8px 14px;font-size:12px">Descartar</button></div>'
     :'';
   return '<div class="instruction-line"><strong>'+escapeHtml(item.marca||'')+' · '+escapeHtml(item.formato||'post')+' · '+escapeHtml(fecha)+'</strong><span>'+escapeHtml(estadoTxt)+'</span><div style="margin-top:8px;display:flex;gap:12px;align-items:flex-start"><img src="'+escapeHtml(item.imagenUrl||'')+'" style="width:90px;border-radius:8px;border:1px solid rgba(255,255,255,.1)"><div style="flex:1;font-size:12.5px;color:#ccc;max-height:70px;overflow:hidden">'+escapeHtml(String(item.caption||'').slice(0,220))+'</div></div>'+acciones+'</div>';
+}
+function gmbPostRow(item){
+  const fecha=item.createdAt?new Date(item.createdAt).toLocaleString('es-ES'):'sin fecha';
+  const estadoTxt={pendiente:'Pendiente de publicar',publicado:'Publicado'}[item.estado]||item.estado;
+  const textoCompleto=(item.titulo?item.titulo+'\\n\\n':'')+String(item.texto||'');
+  const acciones=item.estado==='pendiente'
+    ?'<div style="margin-top:8px;display:flex;gap:8px"><button class="btn-gold" data-gmb-copy style="padding:8px 14px;font-size:12px">Copiar texto</button><button class="btn-dark" onclick="marcarPublicadoGmb('+Number(item.id)+')" style="padding:8px 14px;font-size:12px">Marcar publicado</button></div>'
+    :'';
+  const ctaHtml=item.ctaBoton?(' · Boton: '+escapeHtml(item.ctaBoton)):'';
+  const fotoHtml=item.ideaFoto?('<div style="margin-top:6px;font-size:11.5px;color:#999">📷 '+escapeHtml(item.ideaFoto)+'</div>'):'';
+  return '<div class="instruction-line" data-gmb-texto="'+escapeHtml(textoCompleto)+'"><strong>'+escapeHtml(item.negocio||'')+ctaHtml+' · '+escapeHtml(fecha)+'</strong><span>'+escapeHtml(estadoTxt)+'</span><div style="margin-top:8px;font-size:12.5px;color:#ccc;white-space:pre-wrap">'+escapeHtml(textoCompleto)+'</div>'+fotoHtml+acciones+'</div>';
+}
+async function marcarPublicadoGmb(id){
+  const token=(localStorage.getItem('ceo-panel-token')||'').trim();
+  if(!token) return;
+  try{
+    await fetch('/api/gmb-posts/'+id+'/publicado',{method:'POST',headers:{'x-ceo-token':token}});
+    await refreshGmbPosts();
+  }catch{}
+}
+async function refreshGmbPosts(){
+  const box=document.getElementById('gmb-posts-list');
+  if(!box) return;
+  const token=(localStorage.getItem('ceo-panel-token')||'').trim();
+  try{
+    const response=await fetch('/api/gmb-posts',{headers:{'x-ceo-token':token}});
+    const data=await response.json();
+    if(!response.ok) throw new Error(data.error||'No autorizado');
+    const list=(data.gmbPosts||[]);
+    box.innerHTML=list.length?list.slice(0,12).map(gmbPostRow).join(''):'<div class="instruction-line"><span>Todavia no hay publicaciones de Google Business preparadas.</span></div>';
+    box.querySelectorAll('[data-gmb-copy]').forEach(function(btn){
+      btn.addEventListener('click',function(){
+        const linea=btn.closest('[data-gmb-texto]');
+        const texto=linea?linea.getAttribute('data-gmb-texto'):'';
+        navigator.clipboard.writeText(texto||'').then(function(){
+          btn.textContent='Copiado ✓';
+          setTimeout(function(){ btn.textContent='Copiar texto'; },1500);
+        });
+      });
+    });
+  }catch{
+    box.innerHTML='<div class="instruction-line"><span>No se pudieron cargar las publicaciones de Google Business.</span></div>';
+  }
 }
 function socialExecutionRow(item){
   const badgeClass=String(item.status||'pendiente');
@@ -2083,6 +2385,51 @@ async function refreshInstructions(){
     box.innerHTML='<div class="instruction-line"><span>Token no válido o sin acceso.</span></div>';
   }
 }
+let ceoChatHistorial = [];
+function pintarCeoChat() {
+  const log = document.getElementById('ceo-chat-log');
+  if (!log) return;
+  log.innerHTML = ceoChatHistorial.map(function(t) {
+    const quien = t.role === 'ai' ? 'IA' : 'Tu';
+    const clase = t.role === 'ai' ? 'color:var(--gold,#C9A227)' : 'color:#fff';
+    return '<div class="event-line"><strong style="' + clase + '">' + quien + '</strong><span>' + String(t.content).replace(/</g,'&lt;') + '</span></div>';
+  }).join('');
+  log.scrollTop = log.scrollHeight;
+}
+async function enviarCeoChat() {
+  const input = document.getElementById('ceo-chat-input');
+  const status = document.getElementById('ceo-chat-status');
+  const token = (localStorage.getItem('ceo-panel-token') || '').trim();
+  const mensaje = (input.value || '').trim();
+  if (!mensaje) return;
+  if (!token) { status.textContent = 'Falta el token del CEO (guardalo arriba primero).'; return; }
+  ceoChatHistorial.push({ role: 'user', content: mensaje });
+  pintarCeoChat();
+  input.value = '';
+  status.textContent = 'Pensando...';
+  try {
+    const response = await fetch('/api/ceo-chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-ceo-token': token },
+      body: JSON.stringify({ message: mensaje, historial: ceoChatHistorial.slice(0, -1) }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || 'Error desconocido');
+    ceoChatHistorial.push({ role: 'ai', content: data.respuesta });
+    pintarCeoChat();
+    status.textContent = 'Listo para hablar.';
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  }
+}
+function bindCeoChatPanel() {
+  const btn = document.getElementById('ceo-chat-send');
+  const input = document.getElementById('ceo-chat-input');
+  if (btn) btn.addEventListener('click', enviarCeoChat);
+  if (input) input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); enviarCeoChat(); }
+  });
+}
 async function refreshSocialExecutions(){
   const box=document.getElementById('social-exec-list');
   if(!box) return;
@@ -2108,8 +2455,9 @@ async function refreshSocialExecutions(){
 async function refreshReportes(){
   const box=document.getElementById('reportes-list');
   if(!box) return;
+  const token=(localStorage.getItem('ceo-panel-token')||'').trim();
   try{
-    const response=await fetch('/api/reportes');
+    const response=await fetch('/api/reportes',{headers:{'x-ceo-token':token}});
     const data=await response.json();
     if(!response.ok) throw new Error(data.error||'No autorizado');
     const list=(data.reportes||[]);
@@ -2121,8 +2469,9 @@ async function refreshReportes(){
 async function refreshAuditorias(){
   const box=document.getElementById('auditorias-list');
   if(!box) return;
+  const token=(localStorage.getItem('ceo-panel-token')||'').trim();
   try{
-    const response=await fetch('/api/inbox');
+    const response=await fetch('/api/inbox',{headers:{'x-ceo-token':token}});
     const data=await response.json();
     if(!response.ok) throw new Error(data.error||'No autorizado');
     const list=(data.conversaciones||[]).filter(c=>Array.isArray(c.etiquetas)&&c.etiquetas.includes('auditoria-solicitada'));
@@ -2134,8 +2483,9 @@ async function refreshAuditorias(){
 async function refreshFlyers(){
   const box=document.getElementById('flyers-list');
   if(!box) return;
+  const token=(localStorage.getItem('ceo-panel-token')||'').trim();
   try{
-    const response=await fetch('/api/flyers');
+    const response=await fetch('/api/flyers',{headers:{'x-ceo-token':token}});
     const data=await response.json();
     if(!response.ok) throw new Error(data.error||'No autorizado');
     const list=(data.flyers||[]);
@@ -2389,7 +2739,8 @@ async function refreshOffice(){
   officeRefreshRunning=true;
   const startedAt=Date.now();
   try{
-    const response=await fetch('/api/metrics',{cache:'no-store',headers:{'Accept':'application/json'}});
+    const officeToken=(localStorage.getItem('ceo-panel-token')||'').trim();
+    const response=await fetch('/api/metrics',{cache:'no-store',headers:{'Accept':'application/json','x-ceo-token':officeToken}});
     if(!response.ok) throw new Error('HTTP '+response.status);
     const contentType=response.headers.get('content-type')||'';
     if(!contentType.includes('application/json')) throw new Error('Content-Type inesperado: '+contentType);
@@ -2421,16 +2772,19 @@ function scheduleOfficeRefresh(){
 }
 refreshOffice();
 bindCommandPanel();
+bindCeoChatPanel();
 refreshInstructions();
 refreshSocialExecutions();
 refreshWorkExecutions();
 refreshReportes();
 refreshAuditorias();
 refreshFlyers();
+refreshGmbPosts();
 scheduleOfficeRefresh();
 setInterval(refreshReportes,30000);
 setInterval(refreshAuditorias,20000);
 setInterval(refreshFlyers,20000);
+setInterval(refreshGmbPosts,20000);
 setInterval(refreshInstructions,10000);
 setInterval(refreshSocialExecutions,10000);
 setInterval(refreshWorkExecutions,10000);
@@ -3041,6 +3395,251 @@ setInterval(refreshInbox,15000);
 </html>`;
 }
 
+function renderCalendarioSemanalHtml() {
+  const diasLabel = { lunes: 'Lunes', martes: 'Martes', miercoles: 'Miércoles', jueves: 'Jueves', viernes: 'Viernes', sabado: 'Sábado', domingo: 'Domingo' };
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Calendario Semanal · Oficina Virtual</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:Inter,Segoe UI,sans-serif;background:linear-gradient(180deg,#0b0b0f 0%,#13131a 100%);color:#f3f3f5}
+.shell{max-width:1500px;margin:0 auto;padding:24px}
+.panel{background:rgba(20,20,27,.92);border:1px solid rgba(212,175,55,.20);border-radius:22px;box-shadow:0 20px 60px rgba(0,0,0,.28);padding:20px;margin-bottom:18px}
+.eyebrow{color:#d4af37;font-size:12px;text-transform:uppercase;letter-spacing:.18em;margin-bottom:12px}
+h1,h2,h3{margin:0 0 12px}
+h1{font-size:32px;line-height:1.1}
+p,span{color:#b8b8c3;line-height:1.6}
+.button-row{display:flex;gap:10px;flex-wrap:wrap}
+.btn-gold{padding:12px 16px;border-radius:999px;font-weight:800;text-decoration:none;cursor:pointer;border:none;background:#d4af37;color:#121216;font-size:13px}
+.tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+.tab-btn{padding:10px 18px;border-radius:999px;border:1px solid rgba(212,175,55,.3);background:rgba(255,255,255,.03);color:#f3f3f5;cursor:pointer;font-weight:700;font-size:13px}
+.tab-btn.active{background:#d4af37;color:#121216}
+.semana-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:12px}
+@media(max-width:1100px){.semana-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:600px){.semana-grid{grid-template-columns:1fr}}
+.dia-col{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:16px;padding:12px;display:flex;flex-direction:column;gap:8px;min-height:200px}
+.dia-titulo{font-weight:800;color:#d4af37;font-size:14px;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid rgba(212,175,55,.2);padding-bottom:6px;margin-bottom:2px}
+.card{background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:8px 10px;font-size:12.5px}
+.card .hora{display:inline-block;background:rgba(212,175,55,.15);color:#d4af37;border-radius:6px;padding:1px 6px;font-size:10.5px;font-weight:800;margin-bottom:4px}
+.card .empresa{font-weight:700;color:#f3f3f5;margin-bottom:2px}
+.card .tareas{color:#b8b8c3;white-space:pre-wrap}
+.card .borrar{float:right;color:#ff6b6b;cursor:pointer;font-size:11px;font-weight:700}
+.check-item{display:flex;align-items:flex-start;gap:6px;background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:6px 8px;font-size:12.5px;cursor:pointer}
+.check-item.hecho{opacity:.5}
+.check-item.hecho .texto{text-decoration:line-through}
+.check-box{width:15px;height:15px;border-radius:4px;border:2px solid #888;flex-shrink:0;margin-top:1px}
+.check-item.hecho .check-box{background:#34C759;border-color:#34C759}
+.form-mini{display:flex;flex-direction:column;gap:6px;margin-top:4px}
+.form-mini input,.form-mini textarea,.form-mini select{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:6px 8px;color:#f3f3f5;font-size:12px;font-family:inherit}
+.form-mini textarea{resize:vertical;min-height:40px}
+.form-mini button{padding:6px;border-radius:8px;border:none;background:#d4af37;color:#121216;font-weight:700;font-size:11px;cursor:pointer}
+.form-row{display:flex;gap:6px}
+.form-row input[type=time]{width:90px;flex-shrink:0}
+.hidden{display:none!important}
+.precios-cat{margin-bottom:18px}
+.precios-cat h3{color:#d4af37;font-size:14px;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid rgba(212,175,55,.2);padding-bottom:6px}
+.precios-tabla{width:100%;border-collapse:collapse;font-size:13px}
+.precios-tabla td{padding:8px 6px;border-bottom:1px solid rgba(255,255,255,.06)}
+.precios-tabla input{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);border-radius:6px;padding:5px 7px;color:#f3f3f5;font-size:12.5px;font-family:inherit;width:100%}
+.precios-tabla .col-precio input{width:110px}
+.precios-tabla .borrar{color:#ff6b6b;cursor:pointer;font-weight:700}
+.add-servicio{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.add-servicio input{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);border-radius:8px;padding:8px 10px;color:#f3f3f5;font-size:12.5px;font-family:inherit}
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="panel">
+    <div class="eyebrow">Virtual Marketing Spain · Oficina Virtual</div>
+    <h1>Calendario Semanal</h1>
+    <p>Planifica qué trabaja la oficina cada día y a qué hora, controla tus tareas manuales, y consulta los precios reales de cada servicio.</p>
+    <div class="button-row">
+      <a class="btn-gold" href="/office" style="text-decoration:none">← Volver a la oficina</a>
+      <a class="btn-gold" href="/manual" style="text-decoration:none">Manual operativo</a>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="ia" onclick="cambiarTab('ia')">Trabajo para la oficina (IA)</button>
+      <button class="tab-btn" data-tab="manual" onclick="cambiarTab('manual')">Mis tareas manuales</button>
+      <button class="tab-btn" data-tab="precios" onclick="cambiarTab('precios')">Servicios y precios</button>
+    </div>
+
+    <div id="tab-ia">
+      <p>Asigna a la oficina qué empresa/marca trabajar cada día, a qué hora y qué tiene que hacer. Los trabajadores de la oficina lo usan como plan de trabajo real, ordenado por hora.</p>
+      <div class="semana-grid" id="grid-ia"></div>
+    </div>
+
+    <div id="tab-manual" class="hidden">
+      <p>Cosas que aún haces tú a mano (aún no automatizadas): revisar actualizaciones de páginas, publicaciones semanales de Google My Business por empresa, llamadas, etc. Se marcan como hechas y quedan guardadas, ordenadas por hora.</p>
+      <div class="semana-grid" id="grid-manual"></div>
+    </div>
+
+    <div id="tab-precios" class="hidden">
+      <p>Precios reales y actuales de todos los servicios (sacados de virtualmarketingspain.com/presupuesto). Editables aquí mismo si cambian — así los trabajadores de la oficina y tú siempre veis el precio correcto.</p>
+      <div id="lista-precios"></div>
+      <div class="add-servicio">
+        <input type="text" placeholder="Categoría" id="nueva-categoria" style="width:140px">
+        <input type="text" placeholder="Servicio" id="nuevo-servicio" style="flex:1;min-width:160px">
+        <input type="text" placeholder="Precio (ej: 250€ o 300€/mes)" id="nuevo-precio" style="width:180px">
+        <button class="btn-gold" onclick="anadirServicio()">+ Añadir servicio</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const DIAS = ['lunes','martes','miercoles','jueves','viernes','sabado','domingo'];
+const LABEL = ${JSON.stringify(diasLabel)};
+let DATA = { planSemanalIA: {}, tareasManuales: {} };
+let PRECIOS = [];
+
+function cambiarTab(t) {
+  document.getElementById('tab-ia').classList.toggle('hidden', t !== 'ia');
+  document.getElementById('tab-manual').classList.toggle('hidden', t !== 'manual');
+  document.getElementById('tab-precios').classList.toggle('hidden', t !== 'precios');
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
+}
+
+function esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function cargar() {
+  const r = await fetch('/api/plan-semanal');
+  if (r.ok) { DATA = await r.json(); pintarIA(); pintarManual(); }
+  const r2 = await fetch('/api/servicios-precios');
+  if (r2.ok) { const d2 = await r2.json(); PRECIOS = d2.serviciosPrecios || []; pintarPrecios(); }
+}
+
+function pintarIA() {
+  const grid = document.getElementById('grid-ia');
+  grid.innerHTML = DIAS.map(dia => {
+    const items = (DATA.planSemanalIA && DATA.planSemanalIA[dia]) || [];
+    const cards = items.map(it => \`<div class="card">
+      <span class="borrar" onclick="borrarIA('\${dia}',\${it.id})">✕</span>
+      \${it.hora ? '<span class="hora">' + esc(it.hora) + '</span>' : ''}
+      <div class="empresa">\${esc(it.empresa)}</div>
+      <div class="tareas">\${esc(it.tareas)}</div>
+    </div>\`).join('');
+    return \`<div class="dia-col">
+      <div class="dia-titulo">\${LABEL[dia]}</div>
+      \${cards}
+      <div class="form-mini">
+        <div class="form-row">
+          <input type="time" id="hora-\${dia}">
+          <input type="text" placeholder="Empresa/marca" id="empresa-\${dia}">
+        </div>
+        <textarea placeholder="Qué hay que hacer" id="tareas-\${dia}"></textarea>
+        <button onclick="anadirIA('\${dia}')">+ Asignar</button>
+      </div>
+    </div>\`;
+  }).join('');
+}
+
+function pintarManual() {
+  const grid = document.getElementById('grid-manual');
+  grid.innerHTML = DIAS.map(dia => {
+    const items = (DATA.tareasManuales && DATA.tareasManuales[dia]) || [];
+    const cards = items.map(it => \`<div class="check-item \${it.hecho ? 'hecho' : ''}" onclick="toggleManual('\${dia}',\${it.id})">
+      <div class="check-box"></div>
+      <div style="flex:1">\${it.hora ? '<span class="hora">' + esc(it.hora) + '</span> ' : ''}<span class="texto">\${esc(it.texto)}</span></div>
+      <span class="borrar" onclick="event.stopPropagation();borrarManual('\${dia}',\${it.id})">✕</span>
+    </div>\`).join('');
+    return \`<div class="dia-col">
+      <div class="dia-titulo">\${LABEL[dia]}</div>
+      \${cards}
+      <div class="form-mini">
+        <div class="form-row">
+          <input type="time" id="hora-manual-\${dia}">
+          <input type="text" placeholder="Nueva tarea" id="manual-\${dia}">
+        </div>
+        <button onclick="anadirManual('\${dia}')">+ Añadir</button>
+      </div>
+    </div>\`;
+  }).join('');
+}
+
+function pintarPrecios() {
+  const cont = document.getElementById('lista-precios');
+  const categorias = [...new Set(PRECIOS.map(p => p.categoria))];
+  if (!categorias.length) { cont.innerHTML = '<p>Sin servicios cargados todavía.</p>'; return; }
+  cont.innerHTML = categorias.map(cat => {
+    const filas = PRECIOS.filter(p => p.categoria === cat).map(p => \`<tr>
+      <td><input value="\${esc(p.servicio)}" onchange="editarServicio(\${p.id},'servicio',this.value)"></td>
+      <td class="col-precio"><input value="\${esc(p.precio)}" onchange="editarServicio(\${p.id},'precio',this.value)"></td>
+      <td><span class="borrar" onclick="borrarServicio(\${p.id})">✕</span></td>
+    </tr>\`).join('');
+    return \`<div class="precios-cat">
+      <h3>\${esc(cat)}</h3>
+      <table class="precios-tabla"><tbody>\${filas}</tbody></table>
+    </div>\`;
+  }).join('');
+}
+
+async function anadirIA(dia) {
+  const hora = document.getElementById('hora-' + dia).value;
+  const empresa = document.getElementById('empresa-' + dia).value.trim();
+  const tareas = document.getElementById('tareas-' + dia).value.trim();
+  if (!empresa) return;
+  await fetch('/api/plan-semanal/ia', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dia, hora, empresa, tareas }) });
+  cargar();
+}
+
+async function borrarIA(dia, id) {
+  await fetch('/api/plan-semanal/ia/borrar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dia, id }) });
+  cargar();
+}
+
+async function anadirManual(dia) {
+  const hora = document.getElementById('hora-manual-' + dia).value;
+  const texto = document.getElementById('manual-' + dia).value.trim();
+  if (!texto) return;
+  await fetch('/api/plan-semanal/manual', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dia, hora, texto }) });
+  cargar();
+}
+
+async function toggleManual(dia, id) {
+  await fetch('/api/plan-semanal/manual/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dia, id }) });
+  cargar();
+}
+
+async function borrarManual(dia, id) {
+  await fetch('/api/plan-semanal/manual/borrar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dia, id }) });
+  cargar();
+}
+
+async function anadirServicio() {
+  const categoria = document.getElementById('nueva-categoria').value.trim();
+  const servicio = document.getElementById('nuevo-servicio').value.trim();
+  const precio = document.getElementById('nuevo-precio').value.trim();
+  if (!categoria || !servicio) return;
+  await fetch('/api/servicios-precios', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ categoria, servicio, precio }) });
+  document.getElementById('nueva-categoria').value = '';
+  document.getElementById('nuevo-servicio').value = '';
+  document.getElementById('nuevo-precio').value = '';
+  cargar();
+}
+
+async function editarServicio(id, campo, valor) {
+  await fetch('/api/servicios-precios/editar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, [campo]: valor }) });
+}
+
+async function borrarServicio(id) {
+  await fetch('/api/servicios-precios/borrar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+  cargar();
+}
+
+cargar();
+</script>
+</body>
+</html>`;
+}
+
 function renderManualHtml() {
   const porDepartamento = {};
   for (const [id, info] of Object.entries(MISSION_DATA.agentes)) {
@@ -3080,6 +3679,75 @@ function renderManualHtml() {
   const ritmoDiarioHtml = MISSION_DATA.ritmoDiario.map((r) => `<div class="ritmo-item"><strong>${escapeHtml(r.hora)}</strong><span>${escapeHtml(r.accion)}</span></div>`).join('');
   const ritmoSemanalHtml = Object.entries(MISSION_DATA.ritmoSemanal).map(([dia, tema]) => `<div class="ritmo-item"><strong>${escapeHtml(dia)}</strong><span>${escapeHtml(tema)}</span></div>`).join('');
   const reglaMadreHtml = MISSION_DATA.reglaMadre.map((r) => `<li>${escapeHtml(r)}</li>`).join('');
+
+
+  const ejemplosDept = {
+    direccion: 'Revisa las prioridades de la semana y dime en que deberiamos enfocarnos primero.',
+    operaciones: 'Controla que todas las automatizaciones esten funcionando y avisame si algo falla.',
+    community: 'Quiero un feed en todas las cuentas de Instagram y Facebook esta semana.',
+    copy: 'Escribe 3 variantes de copy para el proximo Reel, con gancho fuerte al principio.',
+    comerciales: 'Haz seguimiento a los leads nuevos de esta semana y priorizalos por interes.',
+    auditorias: 'Prepara una auditoria de la web de [cliente] antes del viernes.',
+    seo: 'Revisa el posicionamiento SEO de nuestras webs propias y dime que prioriza esta semana.',
+    gmb: 'Prepara 3 publicaciones nuevas para la ficha de Google Business de [negocio].',
+    web: 'Revisa la conversion de la landing y dime que cambiarias primero.',
+    automatizacion: 'Revisa que las automatizaciones de n8n esten funcionando bien.',
+    ads: 'Dame un resumen del rendimiento de los anuncios activos esta semana.',
+    research: 'Investiga que estan haciendo bien nuestros competidores esta semana.',
+  };
+  const ejemplosDeptHtml = deptOrder.map((dept) => `
+    <div class="plantilla-item">
+      <div class="plantilla-label">${escapeHtml(DEPT_TITLES[dept])}</div>
+      <div class="plantilla-texto" data-copy>${escapeHtml(ejemplosDept[dept] || 'Cuentame que necesitas de este equipo.')}</div>
+    </div>`).join('');
+
+  const ejemplosAutomatizacion = {
+    publicar_instagram: 'Publica ya el contenido nuevo en Instagram.',
+    publicar_flyer: 'Genera y publica el flyer de hoy.',
+    publicar_reel: 'Publica un reel nuevo hoy en Instagram y Facebook.',
+    auditoria_seo: 'Hazme la auditoria SEO de nuestras webs.',
+    auditoria_web: 'Audita la conversion de nuestra web.',
+    pentest_seguridad: 'Haz una auditoria de seguridad tecnica ahora.',
+    generar_contenido: 'Genera contenido nuevo para redes de las 4 marcas.',
+    ideas_virales: 'Dame ideas virales con gancho y guion.',
+    gmb_contenido: 'Prepara publicaciones para Google Business.',
+    reporte_diario: 'Genera el reporte diario del CEO.',
+    revisar_correos: 'Revisa los correos de Gmail pendientes.',
+    plugfyguard_vigilancia: 'Revisa la vigilancia de PlugfyGuard.',
+    vigilancia_alertas: 'Revisa alertas y vigilancia general.',
+    auditoria_empresa: 'Prepara una auditoria para el cliente [nombre].',
+    auditoria_web_cliente: 'Audita si la web de [cliente] funciona bien y esta adaptada a movil.',
+    investigacion_redes: 'Investiga a la competencia en redes sociales.',
+    briefing_web: 'Genera un briefing para una web nueva.',
+    generar_imagen: 'Genera la imagen del siguiente contenido pendiente.',
+    reenviar_factura: 'Reenvia la ultima factura de [cliente].',
+  };
+  const ejemplosAutomatizacionHtml = REGLAS_AUTOMATIZACION_REAL.map((r) => `
+    <div class="plantilla-item">
+      <div class="plantilla-label">${escapeHtml(r.intento)}</div>
+      <div class="plantilla-texto" data-copy>${escapeHtml(ejemplosAutomatizacion[r.intento] || r.descripcion)}</div>
+    </div>`).join('');
+
+  const ejemplosOficinaHtml = [
+    'Generad trabajo operativo real por grupo: redes, ventas, SEO, web, IA y operaciones.',
+    'Dame un resumen de que esta pasando ahora mismo en toda la oficina.',
+  ].map((t) => `
+    <div class="plantilla-item">
+      <div class="plantilla-label">Toda la oficina</div>
+      <div class="plantilla-texto" data-copy>${escapeHtml(t)}</div>
+    </div>`).join('');
+
+  const guionesComerciales = [
+    {
+      label: 'WhatsApp - pedir cita (lead interesado sin fecha)',
+      texto: 'Hola, buenos dias 👋 Mi nombre es Enrique, de Virtual Marketing Spain.\n\nLe llamamos hace unos dias con nuestra automatizacion con IA y nos comento que le interesaba conocer un poco mas como podemos ayudarle a conseguir mas clientes con automatizacion.\n\nNos gustaria concretar una breve llamada o auditoria gratuita, sin compromiso, para enseñarle exactamente como aplicarlo a su negocio.\n\n¿Que dia y hora le vendria bien esta semana?',
+    },
+  ];
+  const guionesComercialesHtml = guionesComerciales.map((g) => `
+    <div class="plantilla-item" style="grid-column:1 / -1">
+      <div class="plantilla-label">${escapeHtml(g.label)}</div>
+      <div class="plantilla-texto" data-copy style="white-space:pre-wrap">${escapeHtml(g.texto)}</div>
+    </div>`).join('');
 
   return `<!DOCTYPE html>
 <html lang="es">
@@ -3152,9 +3820,34 @@ td{padding:10px 14px;border-top:1px solid rgba(255,255,255,.05);vertical-align:t
     <h2 style="margin-top:20px">Ritmo semanal obligatorio</h2>
     <div class="ritmo-row">${ritmoSemanalHtml}</div>
   </div>
+
+  <div class="panel">
+    <h2>Plantilla: que pedirle a cada departamento (copiar y pegar)</h2>
+    <p>Estas frases funcionan directamente en la Instruccion de la Consola del CEO. Las de "Automatizaciones reales" ejecutan una accion de verdad; las de departamento generan una tarea de seguimiento en la oficina.</p>
+    <h3 style="margin-top:16px">Automatizaciones reales (accion garantizada)</h3>
+    <div class="plantilla-grid">${ejemplosAutomatizacionHtml}</div>
+    <h3 style="margin-top:20px">Por departamento</h3>
+    <div class="plantilla-grid">${ejemplosDeptHtml}</div>
+    <h3 style="margin-top:20px">Toda la oficina</h3>
+    <div class="plantilla-grid">${ejemplosOficinaHtml}</div>
+  </div>
+  <div class="panel">
+    <h2>Guiones y mensajes para comerciales (copiar y pegar)</h2>
+    <p>Plantillas listas para usar en llamadas y WhatsApp con leads reales.</p>
+    <div class="plantilla-grid">${guionesComercialesHtml}</div>
+  </div>
   ${seccionesHtml}
 </div>
 <script>
+document.addEventListener('click', function(e){
+  const item = e.target.closest('[data-copy]');
+  if(!item) return;
+  const texto = item.textContent;
+  navigator.clipboard.writeText(texto).then(function(){
+    item.parentElement.classList.add('copiado');
+    setTimeout(function(){ item.parentElement.classList.remove('copiado'); }, 1200);
+  });
+});
 function timeAgoManual(ms){
   if(!ms) return 'sin datos';
   const diff=Math.max(0,Date.now()-Number(ms));
@@ -3308,20 +4001,21 @@ function recordFailedAuth(ip) {
   failedAuthAttempts.set(ip, rec);
 }
 
-// Solo las rutas protegidas por token pueden bloquear una IP. Las paginas
-// publicas (/office, /operations, /manual, /api/agents, etc.) nunca deben
-// poder quedar bloqueadas por esto -- si no, un fallo de deteccion de IP
-// detras de Traefik (o varias personas compartiendo la misma IP publica,
-// como una oficina) tumbaria el panel para todo el mundo, no solo para
-// quien esta probando el token.
+// SOLO /login participa en el bloqueo por IP (fuerza bruta real: contraseña
+// humana, tecleada, adivinable). Las rutas de API server-a-servidor
+// (heartbeat, instructions, business-metrics, social/work-executions) estan
+// protegidas por tokens largos aleatorios que no son adivinables en 5
+// intentos -- meterlas en el mismo contador de IP causaba un fallo real
+// en produccion (2026-08-22): TODAS las llamadas de n8n a la oficina
+// comparten la misma IP aparente (el propio VPS), asi que un unico 401
+// transitorio en CUALQUIER workflow (o el propio usuario probando el token
+// del panel) bloqueaba 30 minutos las escrituras de TODOS los demas
+// workflows reales (heartbeats/informes perdidos en cascada, confirmado
+// con 57/156 ejecuciones en error en un solo dia). Cada ruta de API sigue
+// comprobando su propio token de forma independiente (401 si no coincide)
+// -- lo unico que cambia es que ese fallo ya no bloquea a nadie mas.
 function isTokenProtectedPath(pathname) {
   if (pathname === '/login') return true;
-  if (pathname === '/api/heartbeat') return true;
-  if (pathname === '/api/agents/remove') return true;
-  if (pathname === '/api/instructions') return true;
-  if (pathname === '/api/business-metrics') return true;
-  if (/^\/api\/social-executions\/\d+$/.test(pathname)) return true;
-  if (/^\/api\/work-executions\/\d+$/.test(pathname)) return true;
   return false;
 }
 
@@ -3443,7 +4137,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'GET' && (url.pathname === '/office' || url.pathname === '/ceo' || url.pathname === '/operations' || url.pathname === '/manual' || url.pathname === '/inbox')) {
+  if (req.method === 'GET' && (url.pathname === '/office' || url.pathname === '/ceo' || url.pathname === '/operations' || url.pathname === '/manual' || url.pathname === '/inbox' || url.pathname === '/calendario-semanal')) {
     if (!isLoggedIn(req)) {
       res.writeHead(302, { Location: '/login' });
       res.end();
@@ -3478,6 +4172,12 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/inbox') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(renderInboxHtml());
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/calendario-semanal') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(renderCalendarioSemanalHtml());
     return;
   }
 
@@ -3606,6 +4306,100 @@ const server = http.createServer(async (req, res) => {
       'Content-Type': ext === 'pdf' ? 'application/pdf' : 'text/html; charset=utf-8',
       'Content-Disposition': `inline; filename="${nombre}"`,
       ...(ext === 'html' ? { 'Content-Security-Policy': "sandbox; default-src 'none'; img-src https: data:; style-src 'unsafe-inline'" } : {}),
+    });
+    res.end(fs.readFileSync(filePath));
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/auditorias/marcar-enviado') {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      const item = auditorias.find((a) => a.id === Number(payload.id));
+      if (!item) {
+        json(res, 404, { error: 'no encontrado' });
+        return;
+      }
+      item.emailEnviado = true;
+      saveState();
+      json(res, 200, { ok: true });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/auditorias') {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const limite = Math.min(Number(url.searchParams.get('limit')) || 200, 5000);
+    json(res, 200, { auditorias: auditorias.slice(-limite).reverse() });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/auditorias') {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req, 5 * 1024 * 1024);
+      const payload = JSON.parse(body || '{}');
+      if (!payload.empresa || !payload.html) {
+        json(res, 400, { error: 'Missing required fields: empresa, html' });
+        return;
+      }
+      fs.mkdirSync(auditoriasDir, { recursive: true });
+      const id = nextAuditoriaId++;
+      fs.writeFileSync(path.join(auditoriasDir, id + '.html'), String(payload.html));
+      const registro = {
+        id,
+        empresa: String(payload.empresa),
+        categoria: String(payload.categoria || ''),
+        telefono: String(payload.telefono || ''),
+        email: String(payload.email || ''),
+        origen: String(payload.origen || 'scraper'),
+        puntuacion: Number.isFinite(Number(payload.puntuacion)) ? Number(payload.puntuacion) : null,
+        resumen: truncate(String(payload.resumen || ''), 400),
+        emailEnviado: Boolean(payload.email_enviado),
+        createdAt: Date.now(),
+      };
+      auditorias.push(registro);
+      saveState();
+      json(res, 200, { ok: true, auditoria: registro });
+    } catch (error) {
+      json(res, 400, { error: 'Invalid body: ' + (error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && /^\/auditorias\/\d+\.html$/.test(url.pathname)) {
+    if (!isLoggedIn(req) && !isAuthorized(req) && !(heartbeatToken && req.headers['x-heartbeat-token'] === heartbeatToken)) {
+      res.writeHead(302, { Location: '/login' });
+      res.end();
+      return;
+    }
+    const match = url.pathname.match(/^\/auditorias\/(\d+)\.html$/);
+    const id = match[1];
+    const filePath = path.join(auditoriasDir, id + '.html');
+    if (!fs.existsSync(filePath)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Auditoria no encontrada');
+      return;
+    }
+    const registro = auditorias.find((a) => String(a.id) === String(id));
+    const nombreArchivo = 'auditoria-' + (registro ? registro.empresa.replace(/[^a-zA-Z0-9]+/g, '-') : id) + '.html';
+    const descargar = url.searchParams.get('descargar') === '1';
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Disposition': `${descargar ? 'attachment' : 'inline'}; filename="${nombreArchivo}"`,
+      'Content-Security-Policy': "sandbox; default-src 'none'; img-src https: data:; style-src 'unsafe-inline'",
     });
     res.end(fs.readFileSync(filePath));
     return;
@@ -3759,6 +4553,229 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/plan-semanal') {
+    if (!isLoggedIn(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    json(res, 200, { planSemanalIA, tareasManuales });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/plan-semanal/ia') {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      const dia = String(payload.dia || '');
+      if (!DIAS_SEMANA.includes(dia) || !payload.empresa) {
+        json(res, 400, { error: 'faltan campos: dia valido, empresa' });
+        return;
+      }
+      const entrada = {
+        id: nextPlanIaId++,
+        hora: String(payload.hora || '').slice(0, 5),
+        empresa: String(payload.empresa).slice(0, 120),
+        tareas: String(payload.tareas || '').slice(0, 2000),
+        createdAt: Date.now(),
+      };
+      planSemanalIA[dia].push(entrada);
+      planSemanalIA[dia].sort((a, b) => (a.hora || '99:99').localeCompare(b.hora || '99:99'));
+      saveState();
+      json(res, 200, { ok: true, entrada });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/plan-semanal/ia/borrar') {
+    if (!isLoggedIn(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      const dia = String(payload.dia || '');
+      const id = Number(payload.id);
+      if (!DIAS_SEMANA.includes(dia)) {
+        json(res, 400, { error: 'dia invalido' });
+        return;
+      }
+      planSemanalIA[dia] = planSemanalIA[dia].filter((it) => it.id !== id);
+      saveState();
+      json(res, 200, { ok: true });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/plan-semanal/manual') {
+    if (!isLoggedIn(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      const dia = String(payload.dia || '');
+      if (!DIAS_SEMANA.includes(dia) || !payload.texto) {
+        json(res, 400, { error: 'faltan campos: dia valido, texto' });
+        return;
+      }
+      const entrada = {
+        id: nextTareaManualId++,
+        hora: String(payload.hora || '').slice(0, 5),
+        texto: String(payload.texto).slice(0, 300),
+        hecho: false,
+        createdAt: Date.now(),
+      };
+      tareasManuales[dia].push(entrada);
+      tareasManuales[dia].sort((a, b) => (a.hora || '99:99').localeCompare(b.hora || '99:99'));
+      saveState();
+      json(res, 200, { ok: true, entrada });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/plan-semanal/manual/toggle') {
+    if (!isLoggedIn(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      const dia = String(payload.dia || '');
+      const id = Number(payload.id);
+      if (!DIAS_SEMANA.includes(dia)) {
+        json(res, 400, { error: 'dia invalido' });
+        return;
+      }
+      const item = tareasManuales[dia].find((it) => it.id === id);
+      if (!item) {
+        json(res, 404, { error: 'no encontrado' });
+        return;
+      }
+      item.hecho = !item.hecho;
+      saveState();
+      json(res, 200, { ok: true, item });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/plan-semanal/manual/borrar') {
+    if (!isLoggedIn(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      const dia = String(payload.dia || '');
+      const id = Number(payload.id);
+      if (!DIAS_SEMANA.includes(dia)) {
+        json(res, 400, { error: 'dia invalido' });
+        return;
+      }
+      tareasManuales[dia] = tareasManuales[dia].filter((it) => it.id !== id);
+      saveState();
+      json(res, 200, { ok: true });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/servicios-precios') {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    json(res, 200, { serviciosPrecios });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/servicios-precios') {
+    if (!isLoggedIn(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      if (!payload.categoria || !payload.servicio) {
+        json(res, 400, { error: 'faltan campos: categoria, servicio' });
+        return;
+      }
+      const entrada = {
+        id: nextServicioId++,
+        categoria: String(payload.categoria).slice(0, 60),
+        servicio: String(payload.servicio).slice(0, 150),
+        precio: String(payload.precio || '').slice(0, 60),
+        createdAt: Date.now(),
+      };
+      serviciosPrecios.push(entrada);
+      saveState();
+      json(res, 200, { ok: true, entrada });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/servicios-precios/editar') {
+    if (!isLoggedIn(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      const item = serviciosPrecios.find((s) => s.id === Number(payload.id));
+      if (!item) {
+        json(res, 404, { error: 'no encontrado' });
+        return;
+      }
+      if (payload.precio !== undefined) item.precio = String(payload.precio).slice(0, 60);
+      if (payload.servicio !== undefined) item.servicio = String(payload.servicio).slice(0, 150);
+      if (payload.categoria !== undefined) item.categoria = String(payload.categoria).slice(0, 60);
+      saveState();
+      json(res, 200, { ok: true, item });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/servicios-precios/borrar') {
+    if (!isLoggedIn(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      const id = Number(payload.id);
+      const idx = serviciosPrecios.findIndex((s) => s.id === id);
+      if (idx >= 0) serviciosPrecios.splice(idx, 1);
+      saveState();
+      json(res, 200, { ok: true });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/flyers') {
     if (!isHeartbeatAuthorized(req)) {
       json(res, 401, { error: 'Unauthorized' });
@@ -3837,6 +4854,69 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       json(res, 500, { error: String(error.message || error) });
     }
+    return;
+  }
+
+  // Mientras no haya API real de Google Business conectada, esto es el panel
+  // manual: n8n genera el texto real (GMBResumenDiario001) y lo guarda aqui;
+  // el CEO copia el texto y lo pega el mismo en la ficha de Google, y marca
+  // publicado -- asi al menos queda visible en la oficina, no solo en un email.
+  if (req.method === 'POST' && url.pathname === '/api/gmb-posts') {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      if (!payload.negocio || !payload.texto) {
+        json(res, 400, { error: 'faltan campos: negocio, texto' });
+        return;
+      }
+      const fecha = payload.fecha || new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' });
+      // Si ya existe un post pendiente de este negocio para hoy, se reemplaza
+      // en vez de duplicar (por si el resumen diario se relanza a mano).
+      const existente = gmbPosts.find((p) => p.negocio === payload.negocio && p.fecha === fecha && p.estado === 'pendiente');
+      const post = existente || { id: nextGmbPostId++, negocio: String(payload.negocio).slice(0, 120), fecha, createdAt: Date.now() };
+      post.titulo = String(payload.titulo || '').slice(0, 120);
+      post.texto = sanitizeSpanishText(String(payload.texto)).slice(0, 1600);
+      post.ctaBoton = String(payload.ctaBoton || '').slice(0, 40);
+      post.ideaFoto = String(payload.ideaFoto || '').slice(0, 300);
+      post.estado = post.estado || 'pendiente';
+      post.updatedAt = Date.now();
+      if (!existente) {
+        gmbPosts.unshift(post);
+        if (gmbPosts.length > 300) gmbPosts.length = 300;
+      }
+      saveState();
+      json(res, 200, { ok: true, post });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/gmb-posts') {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    json(res, 200, { gmbPosts });
+    return;
+  }
+
+  if (req.method === 'POST' && /^\/api\/gmb-posts\/\d+\/publicado$/.test(url.pathname)) {
+    if (!isAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const id = Number(url.pathname.split('/')[3]);
+    const post = gmbPosts.find((p) => p.id === id);
+    if (!post) { json(res, 404, { error: 'No encontrado' }); return; }
+    post.estado = 'publicado';
+    post.updatedAt = Date.now();
+    saveState();
+    json(res, 200, { ok: true, post });
     return;
   }
 
@@ -3965,6 +5045,26 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, { ok: true, instruction: result.instruction, socialExecution: result.socialExecution, workExecutions: result.workExecutions, automatizacionReal: result.automatizacionReal, respuestaInmediata: result.respuestaInmediata });
     } catch {
       json(res, 400, { error: 'Invalid JSON body' });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/ceo-chat') {
+    try {
+      if (!isAuthorized(req)) {
+        json(res, 401, { error: 'Unauthorized' });
+        return;
+      }
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      if (!payload.message) {
+        json(res, 400, { error: 'Missing required field: message' });
+        return;
+      }
+      const respuesta = await responderChatCEO(payload.message, payload.historial);
+      json(res, 200, { ok: true, respuesta });
+    } catch (err) {
+      json(res, 500, { error: 'No se pudo generar respuesta', detalle: String(err && err.message || err) });
     }
     return;
   }
