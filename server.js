@@ -187,6 +187,7 @@ const auditoriasDir = path.join(path.dirname(dataFile), 'auditorias');
 const conversaciones = [];
 const flyers = [];
 const gmbPosts = [];
+const adsBorradores = [];
 const calendario = [];
 const planSemanalIA = { lunes: [], martes: [], miercoles: [], jueves: [], viernes: [], sabado: [], domingo: [] };
 const planSemanalRedes = { lunes: [], martes: [], miercoles: [], jueves: [], viernes: [], sabado: [], domingo: [] };
@@ -196,9 +197,12 @@ const serviciosPrecios = [];
 const ticketsTecnicos = [];
 const clientes = [];
 const clientePosts = [];
+const mediaSubida = [];
 const N8N_INBOX_WEBHOOK_URL = String(process.env.N8N_INBOX_WEBHOOK_URL || '');
 const N8N_INBOX_TOKEN = String(process.env.N8N_INBOX_TOKEN || '');
 const N8N_FLYER_PUBLICAR_URL = String(process.env.N8N_FLYER_PUBLICAR_URL || '');
+const VMSCONTENT_KEY = String(process.env.VMSCONTENT_KEY || '');
+const N8N_PUBLICAR_MEDIA_URL = String(process.env.N8N_PUBLICAR_MEDIA_URL || 'https://n8n.srv1836153.hstgr.cloud/webhook/publicar-media-manual');
 const businessMetrics = {
   ventas: 0,
   captaciones: 0,
@@ -213,6 +217,76 @@ const businessMetrics = {
   updatedAt: null,
 };
 const clients = new Set();
+
+// --- Leads reales del scraper (pestana "Llamadas" del calendario) ---
+// Se cargan una sola vez al arrancar desde un CSV puesto a mano en el volumen
+// persistente /app/data (no forma parte de state.json -- serian ~80k filas,
+// demasiado para guardar/escribir en cada saveState()).
+function parseCsvLine(line) {
+  const fields = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; }
+        else { inQuotes = false; }
+      } else {
+        cur += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ',') {
+      fields.push(cur);
+      cur = '';
+    } else {
+      cur += c;
+    }
+  }
+  fields.push(cur);
+  return fields;
+}
+
+let leadsData = [];
+function cargarLeads() {
+  try {
+    const rutaCsv = path.join(process.env.DATA_FILE ? path.dirname(process.env.DATA_FILE) : '/app/data', 'leads.csv');
+    const raw = fs.readFileSync(rutaCsv, 'utf8').replace(/^\uFEFF/, '');
+    const lineas = raw.split(/\r?\n/).filter((l) => l.length > 0);
+    if (!lineas.length) { leadsData = []; return; }
+    const cabecera = parseCsvLine(lineas[0]);
+    const idx = {
+      nombre: cabecera.indexOf('Nombre'),
+      categoria: cabecera.indexOf('Categoria'),
+      zona: cabecera.indexOf('Zona'),
+      ciudad: cabecera.indexOf('Ciudad'),
+      direccion: cabecera.indexOf('Direccion'),
+      telefono: cabecera.indexOf('Telefono'),
+      web: cabecera.indexOf('Web'),
+    };
+    const out = [];
+    for (let i = 1; i < lineas.length; i++) {
+      const f = parseCsvLine(lineas[i]);
+      const telefono = (f[idx.telefono] || '').trim();
+      if (!telefono) continue;
+      out.push({
+        nombre: (f[idx.nombre] || '').trim(),
+        categoria: (f[idx.categoria] || 'Sin categoria').trim(),
+        ciudad: (f[idx.ciudad] || f[idx.zona] || 'Sin ciudad').trim(),
+        direccion: (f[idx.direccion] || '').trim(),
+        telefono,
+        web: (f[idx.web] || '').trim(),
+      });
+    }
+    leadsData = out;
+    console.log('[leads] cargados', leadsData.length, 'leads con telefono desde', rutaCsv);
+  } catch (e) {
+    console.error('[leads] no se pudo cargar leads.csv:', e.message);
+    leadsData = [];
+  }
+}
+cargarLeads();
 let nextEventId = 1;
 let nextInstructionId = 1;
 let nextSocialExecutionId = 1;
@@ -223,6 +297,7 @@ let nextConversacionId = 1;
 let nextMensajeId = 1;
 let nextFlyerId = 1;
 let nextGmbPostId = 1;
+let nextAdsBorradorId = 1;
 let nextCalendarioId = 1;
 let nextPlanIaId = 1;
 let nextPlanRedesId = 1;
@@ -231,6 +306,7 @@ let nextServicioId = 1;
 let nextTicketId = 1;
 let nextClienteId = 1;
 let nextClientePostId = 1;
+let nextMediaSubidaId = 1;
 
 const TEAM_RESOURCES = {
   community: [
@@ -379,6 +455,10 @@ function loadState() {
       gmbPosts.splice(0, gmbPosts.length, ...parsed.gmbPosts);
       nextGmbPostId = Math.max(0, ...gmbPosts.map((p) => p.id || 0)) + 1;
     }
+    if (Array.isArray(parsed.adsBorradores)) {
+      adsBorradores.splice(0, adsBorradores.length, ...parsed.adsBorradores);
+      nextAdsBorradorId = Math.max(0, ...adsBorradores.map((p) => p.id || 0)) + 1;
+    }
     if (Array.isArray(parsed.calendario)) {
       calendario.splice(0, calendario.length, ...parsed.calendario);
       nextCalendarioId = Math.max(0, ...calendario.map((c) => c.id || 0)) + 1;
@@ -423,6 +503,10 @@ function loadState() {
       clientePosts.splice(0, clientePosts.length, ...parsed.clientePosts);
       nextClientePostId = Math.max(0, ...clientePosts.map((p) => p.id || 0)) + 1;
     }
+    if (Array.isArray(parsed.mediaSubida)) {
+      mediaSubida.splice(0, mediaSubida.length, ...parsed.mediaSubida);
+      nextMediaSubidaId = Math.max(0, ...mediaSubida.map((m) => m.id || 0)) + 1;
+    }
     if (Array.isArray(parsed.agents)) {
       agents.clear();
       for (const agent of parsed.agents) {
@@ -455,10 +539,12 @@ function saveState() {
       planSemanalIA,
       planSemanalRedes,
       tareasManuales,
+      mediaSubida,
       serviciosPrecios,
       conversaciones,
       flyers,
       gmbPosts,
+      adsBorradores,
       calendario,
       businessMetrics,
       ticketsTecnicos,
@@ -821,6 +907,28 @@ function publicWorkExecutions() {
 }
 
 const TEAM_EXECUTION_TEMPLATES = {
+  ads_google: {
+    title: 'Ejecución Google Ads (borrador, sin API todavia)',
+    steps: [
+      ['estrategia', 'Estrategia y objetivo de campaña'],
+      ['keywords', 'Investigación de keywords'],
+      ['copy', 'Titulares y descripciones (RSA)'],
+      ['creativo', 'Creatividades / Performance Max'],
+      ['presupuesto', 'Presupuesto, puja y KPIs'],
+    ],
+    preferredAgents: ['google_ads_estrategia', 'google_ads_keywords', 'google_ads_copy', 'google_ads_creativo', 'google_ads_presupuesto'],
+  },
+  ads_meta: {
+    title: 'Ejecución Meta Ads (borrador, sin API todavia)',
+    steps: [
+      ['estrategia', 'Estrategia y objetivo de campaña'],
+      ['audiencias', 'Públicos y segmentación'],
+      ['copy', 'Copy principal y CTA'],
+      ['creativo', 'Dirección creativa (imagen/video)'],
+      ['presupuesto', 'Presupuesto y puja'],
+    ],
+    preferredAgents: ['meta_ads_estrategia', 'meta_ads_audiencias', 'meta_ads_copy', 'meta_ads_creativo', 'meta_ads_presupuesto'],
+  },
   community: {
     title: 'Ejecución de redes',
     steps: [
@@ -1129,11 +1237,17 @@ function completeSocialExecutionStep(executionId, stepKey) {
 
 function publicBusinessMetrics(list = publicAgents()) {
   const automatic = aggregateBusinessMetrics(list);
+  // Los valores guardados a mano en el Editor de negocio (businessMetrics)
+  // deben ganar siempre sobre el calculo automatico -- antes el orden del
+  // spread era al reves y el automatico (que da 0 en casi todos los campos
+  // porque ningun agente reporta ventas/ganancias reales) machacaba
+  // silenciosamente lo que el CEO acababa de guardar. Bug real: "el editor
+  // de metricas y negocio muestra siempre 0".
   return {
-    ...businessMetrics,
     ...automatic,
-    notes: automatic.notes || businessMetrics.notes || '',
-    updatedAt: automatic.updatedAt || businessMetrics.updatedAt || null,
+    ...businessMetrics,
+    notes: businessMetrics.notes || automatic.notes || '',
+    updatedAt: businessMetrics.updatedAt || automatic.updatedAt || null,
   };
 }
 
@@ -1160,6 +1274,106 @@ function setBusinessMetrics(payload = {}) {
   return publicBusinessMetrics();
 }
 
+// Publica de verdad en Instagram (cuenta principal) un archivo que el CEO ha
+// subido a mano desde el panel (avatar propio hecho con Gemini, foto real,
+// etc.) -- usa el mismo pipeline real de siempre (mismo webhook/nodo robusto
+// que ya usan los generadores automaticos), solo que el video/imagen no lo
+// genera la IA, lo pone el CEO.
+async function publicarMediaSubidaChat(mensaje) {
+  if (!mediaSubida.length) {
+    return { ok: false, error: 'No hay ningun archivo subido todavia -- sube una imagen o video primero con el clip del panel.' };
+  }
+  const media = mediaSubida.find((m) => !m.publicado) || mediaSubida[0];
+
+  let caption = '';
+  try {
+    const gen = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      signal: AbortSignal.timeout(20000),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        temperature: 0.7,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: 'Eres el community manager de Virtual Marketing Spain. El CEO ha subido un video o imagen propio (puede ser su propio avatar generado con IA) y quiere publicarlo. Te da una instruccion de que debe decir el texto. Escribe un caption real para Instagram en espanol de Espana, con gancho en la primera frase (nunca "Hola somos..."), y 8-10 hashtags relevantes. Devuelve JSON: {"caption":"texto con gancho, sin hashtags dentro","hashtags":["palabra1","palabra2",...]}' },
+          { role: 'user', content: String(mensaje).slice(0, 500) || 'Publica este contenido con un texto atractivo sobre Virtual Marketing Spain.' },
+        ],
+      }),
+    });
+    if (gen.ok) {
+      const data = await gen.json();
+      const parsed = JSON.parse(data.choices?.[0]?.message?.content || '{}');
+      const tags = (Array.isArray(parsed.hashtags) ? parsed.hashtags : []).map((h) => '#' + String(h).replace(/^#/, '')).join(' ');
+      caption = (parsed.caption || '').trim() + (tags ? ('\n\n' + tags) : '');
+    }
+  } catch (e) { /* si falla la IA, seguimos con caption vacio en vez de bloquear la publicacion real */ }
+  if (!caption) caption = String(mensaje).slice(0, 300) || 'Virtual Marketing Spain';
+
+  let n8nOk = false;
+  let n8nError = '';
+  try {
+    const pubRes = await fetch(N8N_PUBLICAR_MEDIA_URL, {
+      method: 'POST',
+      signal: AbortSignal.timeout(15000),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mediaUrl: media.url, tipo: media.tipo, caption, ordenReal: true }),
+    });
+    n8nOk = pubRes.ok;
+    if (!pubRes.ok) n8nError = `n8n respondio ${pubRes.status}`;
+  } catch (e) {
+    n8nError = String(e.message || e);
+  }
+  if (n8nOk) {
+    media.publicado = true;
+    saveState();
+  }
+  return { ok: n8nOk, media, caption, error: n8nOk ? undefined : (n8nError || 'no se pudo disparar la publicacion real') };
+}
+
+// Estado real "ahora mismo" de la oficina, para cuando el CEO pregunta que
+// esta pasando / que estan haciendo los trabajadores -- lee directamente
+// publicAgents() (heartbeats reales), nunca inventa actividad. No usa IA,
+// es puro dato real formateado.
+const DEPT_TITLES_LOCAL = {
+  direccion: 'Dirección', scraper: 'Scrapers/Investigación', community: 'Community y redes',
+  comerciales: 'Comerciales', seo: 'SEO/GEO/AEO', web: 'Web', automatizacion: 'IA y automatización',
+  pentesting: 'Pentesting/Seguridad', tecnico: 'Soporte técnico', operaciones: 'Operaciones',
+};
+async function estadoEquipoAhoraChat() {
+  const ahora = Date.now();
+  const LIMITE_ACTIVO_MS = 2 * 60 * 60 * 1000; // 2h -- mismo orden de magnitud que OFFLINE_TIMEOUT_MS
+  const todos = publicAgents();
+  const activos = todos.filter((a) => a.state && a.state !== 'offline' && (ahora - (a.lastSeen || 0)) < LIMITE_ACTIVO_MS);
+  const porDepto = {};
+  for (const a of activos) {
+    const dep = inferDepartment(a);
+    (porDepto[dep] = porDepto[dep] || []).push(a);
+  }
+  const departamentos = Object.keys(porDepto)
+    .sort((a, b) => porDepto[b].length - porDepto[a].length)
+    .map((dep) => {
+      const nombre = DEPT_TITLES_LOCAL[dep] || dep;
+      const ejemplos = porDepto[dep].slice(0, 3).map((a) => `${a.name || a.agent} (${a.state}${a.task ? ': ' + String(a.task).slice(0, 80) : ''})`).join('; ');
+      const resto = porDepto[dep].length > 3 ? ` y ${porDepto[dep].length - 3} más` : '';
+      return { departamento: nombre, total: porDepto[dep].length, ejemplos: ejemplos + resto };
+    });
+  return { ok: true, totalActivos: activos.length, totalRegistrados: todos.length, departamentos };
+}
+
+// Lee el calendario de contenido REAL ya guardado (mismo array que alimenta
+// publicar_flyer/publicar_reel/publicar_historia -- "la marca que toque segun
+// el calendario") y devuelve hoy + las proximas entradas programadas. Antes
+// de esto no habia ninguna forma de responder "cuando esta programada la
+// siguiente publicacion" salvo el fallback honesto de "no tengo ese dato".
+async function consultarCalendarioRedesChat() {
+  const hoyStr = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' });
+  const ordenado = [...calendario].sort((a, b) => String(a.fecha).localeCompare(String(b.fecha)));
+  const hoy = ordenado.find((c) => c.fecha === hoyStr) || null;
+  const proximas = ordenado.filter((c) => c.fecha > hoyStr).slice(0, 5);
+  return { ok: true, hoyStr, hoy, proximas, totalProgramadas: calendario.length };
+}
+
 // Disparadores reales de n8n para ordenes del CEO -- antes de esto
 // pushInstruction solo guardaba texto y fabricaba una simulacion visual
 // (maybeCreateSocialExecution/maybeCreateWorkExecutions), sin ejecutar nada
@@ -1172,6 +1386,24 @@ function setBusinessMetrics(payload = {}) {
 const N8N_BASE = 'https://n8n.srv1836153.hstgr.cloud/webhook/';
 const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '');
 
+// Bug real (2026-09-10): cuando el CEO pedia por chat un reel/flyer/historia
+// de una marca concreta (ej. "publica un reel de Virtual Marketing Spain"),
+// el POST al webhook de n8n solo mandaba { tema: texto } -- nunca la marca
+// pedida. El workflow de n8n caia siempre en "la marca que toque segun el
+// calendario/rotacion", asi que una orden explicita de VMS podia acabar
+// publicando Gramflow si le tocaba a Gramflow ese dia. Esto detecta la marca
+// mencionada en el texto (si hay alguna) para mandarla explicita como
+// marcaSolicitada; los workflows de n8n (ReelDiario001 y similares) ya la
+// respetan con prioridad sobre el calendario cuando llega.
+function detectarMarcaExplicita(texto) {
+  const t = String(texto || '').toLowerCase();
+  if (/\btpv\s*plugfy\b|\btpvplugfy\b/.test(t)) return 'tpvplugfy';
+  if (/\bgramflow\b/.test(t)) return 'gramflow';
+  if (/\bvirtual\s*marketing\s*spain\b|\bvms\b/.test(t)) return 'vms';
+  if (/\bplugfy(\.pro)?\b/.test(t)) return 'plugfy';
+  return null;
+}
+
 // Catalogo de automatizaciones reales disponibles -- 'descripcion' es lo que
 // lee la IA para decidir si una orden en lenguaje natural del CEO encaja,
 // asi que hay que mantenerlo honesto: si algo no esta aqui, no existe de
@@ -1179,7 +1411,7 @@ const OPENAI_API_KEY = String(process.env.OPENAI_API_KEY || '');
 const REGLAS_AUTOMATIZACION_REAL = [
   { intento: 'publicar_instagram', descripcion: 'Publicar en el feed de Instagram el siguiente contenido nuevo ya preparado en la cola, para cualquiera de las 4 marcas. NO sirve para reutilizar publicaciones antiguas -- eso no existe todavia. Para Stories usar publicar_historia, para Reels usar publicar_reel.', re: /\bpublica(r|d|mos|ndo|lo|los)?\b|\bpubliquen\b/i, path: 'instagram-publicar-trigger-prueba', method: 'GET' },
   { intento: 'publicar_flyer', descripcion: 'Generar y publicar HOY un Flyer (imagen fija) nuevo en Instagram para la marca que toque segun el calendario de contenido, en feed y tambien como Story si el calendario lo indica.', re: /\bflyers?\b/i, path: 'flyer-diario-test', method: 'POST' },
-  { intento: 'publicar_reel', descripcion: 'Generar y publicar HOY un Reel (video corto) nuevo en Instagram Y Facebook para la marca que toque segun el calendario de contenido, en feed y tambien como Story si el calendario lo indica. Reels SI existe y funciona de verdad. Usar esto tambien cuando el CEO pida algo generico como "publicacion en redes sociales" sin especificar formato, ya que es el formato mas completo disponible.', re: /\breels?\b|\bvideos?\b|\bpublicaci[oó]n(es)?\b.*\bredes\b|\bredes\s*sociales\b.*\bpublica/i, path: 'reel-diario-test', method: 'POST' },
+  { intento: 'publicar_reel', descripcion: 'Generar y publicar HOY un Reel (video corto) nuevo en Instagram Y Facebook para la marca que toque segun el calendario de contenido, en feed y tambien como Story si el calendario lo indica. Reels SI existe y funciona de verdad. Usar esto tambien cuando el CEO pida algo generico como "publicacion en redes sociales" sin especificar formato -- PERO SOLO SI NO hay ningun archivo subido pendiente de publicar en el contexto de abajo; si lo hay y el mensaje del CEO puede razonablemente referirse a el (aunque no use la palabra "subido" -- p.ej. "esta imagen", "esto", "lo que te he pasado"), usar publicar_media_subida en su lugar, nunca este.', re: /\breels?\b|\bvideos?\b|\bpublicaci[oó]n(es)?\b.*\bredes\b|\bredes\s*sociales\b.*\bpublica/i, path: 'reel-diario-test', method: 'POST' },
   { intento: 'publicar_historia', descripcion: 'Generar y publicar HOY una Historia (Story) nueva en Instagram para la marca que toque segun el calendario de contenido.', re: /\bhistorias?\b|\bstor(y|ies)\b/i, path: 'historia-diaria-prueba', method: 'POST' },
   { intento: 'auditoria_seo', descripcion: 'Auditoria semanal de SEO/GEO/AEO de las webs propias.', re: /\bseo\b/i, path: 'seo-auditoria-test', method: 'POST' },
   { intento: 'auditoria_web', descripcion: 'Auditoria de conversion/UX de las webs propias (landing, CTAs, estructura).', re: /\bweb\b/i, path: 'auditoria-web-test', method: 'POST' },
@@ -1192,7 +1424,10 @@ const REGLAS_AUTOMATIZACION_REAL = [
   { intento: 'anadir_servicio_cliente', descripcion: 'Anadir un servicio nuevo (Google Ads, Meta Ads, SEO, web, automatizacion, redes, etc.) a un cliente YA existente, y asignarlo al equipo real que corresponda. Usar cuando se nombre un cliente ya dado de alta pidiendo un servicio adicional.', re: /\bquiere\s*tambien\b|\ba[ñn]ad[ei]r?\s*servicio\b|\btambien\s*quiere\b/i, local: anadirServicioClienteChat },
   { intento: 'generar_post_cliente', descripcion: 'Generar texto + hashtags reales para una publicacion de Instagram/Facebook de un cliente cualquiera (de la lista de clientes dados de alta, no solo las 4 marcas propias), listos para copiar/pegar. Usar cuando se pida una publicacion/post para un cliente concreto.', re: /\b(publicaci[oó]n|post)\b.*\bpara\b|\bpublica(r)?\b.*\bcliente\b/i, local: generarPostClienteChat },
   { intento: 'gmb_resumen_diario', descripcion: 'Enviar por email el resumen diario con las publicaciones de Google Business listas para subir manualmente de las 6 empresas (mientras no este conectada la API real de Google Business).', re: /resumen.*google\s*business|google\s*business.*resumen|env.*google\s*business|todos\s*los\s*d[ií]as.*google\s*business/i, path: 'gmb-resumen-diario', method: 'POST' },
-  { intento: 'reporte_diario', descripcion: 'Generar el reporte ejecutivo diario para el CEO con el estado de la oficina y las automatizaciones.', re: /\breporte\b/i, path: 'reporte-diario-test', method: 'POST' },
+  { intento: 'estado_equipo_ahora', descripcion: 'Decir AHORA MISMO, en el propio chat, que esta pasando en la oficina o que estan haciendo los trabajadores/equipos ahora (estado en vivo real, no un email). Usar para preguntas tipo "que esta pasando ahora", "que estan haciendo los trabajadores", "dame el estado del equipo/la oficina ahora".', re: /qu[eé]\s*(est[aá]|estan|est[aá]n)\s*(pasando|haciendo)|estado\s*(de\s*)?(la\s*oficina|los?\s*trabajador|el\s*equipo)|c[oó]mo\s*van\s*los?\s*trabajador/i, local: estadoEquipoAhoraChat },
+  { intento: 'publicar_media_subida', descripcion: 'Publicar en redes sociales una foto o video que el CEO acaba de subir el mismo desde el panel (con el boton del clip), por ejemplo un avatar suyo generado con IA en Gemini. NO sirve para generar contenido nuevo con IA -- solo para el archivo que el CEO ya subio a mano. Usar cuando el CEO diga cosas como "publica esto", "sube el video que acabo de subir", "publica mi avatar", "publica la foto/el video subido" -- Y TAMBIEN con frases mas naturales que no usen la palabra "subido" en absoluto (p.ej. "publica esta imagen de que necesitamos comerciales", "sacad esto a redes", "publicad lo que os he pasado"), SIEMPRE que el contexto de abajo indique que hay un archivo pendiente de publicar: en ese caso, cualquier peticion de publicar contenido sin especificar que hay que generarlo desde cero se refiere a ese archivo, no a generar nada nuevo.', re: /\b(publica|sube|publiquen)[a-z]*\b.{0,30}\b(subid[oa]|acabo\s*de\s*subir|avatar|el\s*clip|lo\s*que\s*he\s*subido|esta\s*imagen|este\s*v[ií]deo|esta\s*foto|lo\s*que\s*(te\s*)?he\s*pasado)\b/i, local: publicarMediaSubidaChat },
+  { intento: 'reporte_diario', descripcion: 'Generar por EMAIL el reporte ejecutivo diario completo (no es para contestar en el chat en el momento).', re: /\breporte\b/i, path: 'reporte-diario-test', method: 'POST' },
+  { intento: 'email_capacidades_chatbots', descripcion: 'Enviar por EMAIL a una direccion concreta que el CEO indique en el mensaje un resumen real de lo que se puede automatizar con chatbots e IA (chatbot de atencion al cliente, automatizacion de WhatsApp, bot de llamadas con IA, automatizacion de procesos internos, informes automaticos). Usar cuando el CEO pida enviar o mandar un email a alguien sobre chatbots, automatizacion o inteligencia artificial -- necesita que el mensaje incluya una direccion de email.', re: /\b(env[ií]a|manda|env[ií]ale|mandale)\b.{0,20}\bemail\b.{0,40}\b(chatbot|autom|inteligencia\s*artificial|\bia\b)|\bemail\b.{0,40}\b(chatbot|autom.{0,20}ia\b)\b.{0,20}\b(env[ií]a|manda)/i, path: 'enviar-email-chatbots', method: 'POST' },
   { intento: 'revisar_correos', descripcion: 'Revisar y clasificar los correos de Gmail pendientes.', re: /\bcorreos?\b|\bgmail\b|\bemails?\b/i, path: 'gmail-revisar-ahora', method: 'POST' },
   { intento: 'plugfyguard_vigilancia', descripcion: 'Vigilancia de seguridad especifica de PlugfyGuard sobre las apps propias (Plugfy panel, Gramflow).', re: /\bplugfyguard\b/i, path: 'plugfyguard-revisar-ahora', method: 'POST' },
   { intento: 'revisar_errores_n8n', descripcion: 'Revisar de verdad, consultando la API real de n8n, si algun workflow/automatizacion (bot de llamadas, redes, GMB, facturas, etc.) ha fallado en las ultimas 24 horas -- lista cada error real con el workflow, el nodo y el mensaje exacto. Ademas hay un aviso automatico por email cada 2h si aparece un error nuevo, sin que el CEO tenga que preguntar.', re: /\berrores?\b|\bfallos?\b|\bfalla(ndo|r)?\b|\bdiagnostic/i, path: 'revisar-errores-n8n', method: 'POST' },
@@ -1212,6 +1447,7 @@ const REGLAS_AUTOMATIZACION_REAL = [
   { intento: 'estado_auditorias', descripcion: 'Estado real AHORA MISMO de las auditorias gratuitas solicitadas por clientes potenciales via WhatsApp: cuantas hay, cuantas tienen cita confirmada, cuantas siguen sin agendar, proximas citas. Datos reales del inbox, no inventados.', re: /\bauditor[ií]as?\s*(pendiente|solicitad|agend)|\bcuantas?\s*auditor[ií]as?\b|estado.*auditor[ií]as?/i, path: 'auditorias-estado-real', method: 'GET' },
   { intento: 'lanzar_llamadas', descripcion: 'Disparar AHORA un lote real de llamadas salientes del bot de ventas (a los leads pendientes segun la cola real, respetando el limite diario ya configurado). Distinto de estado_ventas: esto EJECUTA llamadas de verdad, no solo consulta cifras.', re: /\b(lanza|dispara|empieza|inicia)\b.*\bllama/i, path: 'lanzar-llamadas-real', method: 'POST' },
   { intento: 'metricas_redes', descripcion: 'Metricas REALES de las ultimas publicaciones de Instagram (alcance, vistas, likes, comentarios) de las 2 cuentas, consultadas en directo a la API de Instagram ahora mismo. No es el calendario de contenido ni el catalogo de automatizaciones, son resultados reales de rendimiento.', re: /m[eé]tricas?\b|\brendimiento\b|\bresultados?\s*(de\s*)?(redes|contenido|posts?|publicaciones)\b|\balcance\b|\bengagement\b|c[oó]mo\s*(va|van|est[aá]n?)\s*(las\s*)?redes/i, path: 'metricas-redes-real', method: 'GET' },
+  { intento: 'consultar_calendario_redes', descripcion: 'Consultar AHORA que publicacion (marca, formato: reel/feed/story, hora) esta programada hoy y en los proximos dias segun el calendario de contenido REAL ya guardado. Es solo CONSULTA -- distinto de publicar_flyer/publicar_reel/publicar_historia (que generan y publican algo nuevo ya mismo) y de metricas_redes (que da resultados de lo ya publicado). Usar para preguntas tipo "cuando esta programada la proxima publicacion", "que toca publicar hoy/manana", "calendario de redes", "cuando publicamos en instagram".', re: /cu[aá]ndo\s*(est[aá]n?)?\s*programad|calendario\s*(de\s*)?(contenido|redes)|qu[eé]\s*toca\s*publicar|pr[oó]xima\s*publicaci[oó]n|cu[aá]ndo\s*(se\s*)?publica(mos)?/i, local: consultarCalendarioRedesChat },
 ];
 
 // Clasificador por IA: en vez de exigir que el CEO escriba exactamente la
@@ -1222,7 +1458,16 @@ const REGLAS_AUTOMATIZACION_REAL = [
 // deja explicito.
 async function clasificarAutomatizacionesConIA(mensaje) {
   const catalogo = REGLAS_AUTOMATIZACION_REAL.map((r) => `- ${r.intento}: ${r.descripcion}`).join('\n');
-  const systemPrompt = `Eres el clasificador de ordenes del CEO de una agencia de marketing. Tienes este catalogo de automatizaciones REALES disponibles (y solo estas, ninguna mas):\n${catalogo}\n\nDado el mensaje del CEO, devuelve SOLO un JSON con la forma {"intentos": ["nombre_intento", ...]} listando los intentos del catalogo que la orden pide ejecutar AHORA, de forma explicita y clara. Puede haber varios, uno, o ninguno.\n\nSe muy estricto -- ante la duda, deja el array vacio. En concreto:\n- Una pregunta de charla o de estado general ("como vamos", "que tal", "algun problema", "todo bien por ahi") NO es una orden de ejecutar nada, aunque el catalogo tenga un intento parecido (ej. reporte_diario) -- eso solo cuenta si el CEO pide explicitamente el reporte/informe/resumen en si (ej. "mandame el reporte diario", "generame el informe").\n- Si la orden pide algo que no esta en el catalogo (por ejemplo Stories, Reels, reutilizar publicaciones antiguas, o cualquier otra cosa sin un intento correspondiente en la lista de arriba), NO inventes una coincidencia -- devuelve un array vacio para esa parte. Revisa bien la lista completa antes de descartar algo, puede haber cambiado recientemente.\nNo expliques nada, solo el JSON.`;
+  // Contexto real del archivo pendiente: sin esto, el clasificador no tiene
+  // forma de saber a que se refiere el CEO cuando dice "esto"/"esta imagen"
+  // sin la palabra literal "subido" -- causaba que peticiones en lenguaje
+  // natural cayeran en publicar_reel (el catch-all generico) en vez de
+  // publicar_media_subida, aunque hubiera un archivo real esperando.
+  const pendiente = mediaSubida.filter((m) => !m.publicado);
+  const contextoMedia = pendiente.length
+    ? `\n\nCONTEXTO IMPORTANTE: ahora mismo hay ${pendiente.length} archivo(s) subido(s) por el CEO pendiente(s) de publicar (el mas reciente: "${pendiente[pendiente.length - 1].nombreOriginal}", tipo ${pendiente[pendiente.length - 1].tipo}). Si el mensaje del CEO pide publicar/subir/sacar contenido a redes SIN pedir explicitamente generar algo nuevo con IA, y no especifica un formato que no encaje con ese archivo, asume que se refiere a ESE archivo pendiente y usa publicar_media_subida -- aunque no diga la palabra "subido" literalmente.`
+    : '\n\nCONTEXTO: ahora mismo no hay ningun archivo subido pendiente de publicar, asi que publicar_media_subida no puede aplicar.';
+  const systemPrompt = `Eres el clasificador de ordenes del CEO de una agencia de marketing. Tienes este catalogo de automatizaciones REALES disponibles (y solo estas, ninguna mas):\n${catalogo}${contextoMedia}\n\nDado el mensaje del CEO, devuelve SOLO un JSON con la forma {"intentos": ["nombre_intento", ...]} listando los intentos del catalogo que la orden pide ejecutar AHORA, de forma explicita y clara. Puede haber varios, uno, o ninguno.\n\nSe muy estricto -- ante la duda, deja el array vacio. En concreto:\n- Una pregunta de charla o de estado general ("como vamos", "que tal", "algun problema", "todo bien por ahi") NO es una orden de ejecutar nada, aunque el catalogo tenga un intento parecido (ej. reporte_diario) -- eso solo cuenta si el CEO pide explicitamente el reporte/informe/resumen en si (ej. "mandame el reporte diario", "generame el informe").\n- Si la orden pide algo que no esta en el catalogo (por ejemplo Stories, Reels, reutilizar publicaciones antiguas, o cualquier otra cosa sin un intento correspondiente en la lista de arriba), NO inventes una coincidencia -- devuelve un array vacio para esa parte. Revisa bien la lista completa antes de descartar algo, puede haber cambiado recientemente.\n- Interpreta el mensaje del CEO como lenguaje natural real, no busques palabras clave exactas -- el CEO puede pedir lo mismo de muchas formas distintas, entiende la intencion real usando tambien el CONTEXTO de arriba.\nNo expliques nada, solo el JSON.`;
 
   const respuesta = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -1318,16 +1563,19 @@ function upsertPlanSemanalRedes(marca, tipo, cuenta, hora, resumen) {
 function upsertPlanSemanalIA(empresa, tareas) {
   const dia = DIAS_SEMANA[(new Date().getDay() + 6) % 7]; // getDay(): 0=domingo -> reindexado a lunes=0
   const hora = new Date().toLocaleTimeString('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit' });
-  const lista = planSemanalIA[dia];
   const hoyStr = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' });
-  const existente = lista.find((it) => it.empresa === empresa && it.fechaDia === hoyStr);
-  if (existente) {
-    existente.hora = hora;
-    existente.tareas = tareas;
-  } else {
-    lista.push({ id: nextPlanIaId++, hora, empresa: String(empresa).slice(0, 120), tareas: String(tareas).slice(0, 2000), fechaDia: hoyStr, createdAt: Date.now() });
-  }
-  lista.sort((a, b) => (a.hora || '99:99').localeCompare(b.hora || '99:99'));
+  // Bug real corregido (2026-09-16): planSemanalIA[dia] esta indexado por
+  // NOMBRE del dia de la semana (lunes, martes...), que se repite cada
+  // semana -- antes solo se comprobaba/reemplazaba la entrada de HOY
+  // (mismo fechaDia), asi que la entrada del mismo dia de semanas
+  // ANTERIORES para la misma empresa se quedaba acumulada para siempre
+  // (el lunes de hace 3 semanas seguia mostrandose junto al de hoy).
+  // Ahora se eliminan TODAS las entradas previas de esa empresa en ese
+  // dia de la semana (de cualquier semana) antes de anadir la nueva --
+  // actualizar el calendario reemplaza lo anterior, no lo acumula.
+  planSemanalIA[dia] = planSemanalIA[dia].filter((it) => it.empresa !== empresa);
+  planSemanalIA[dia].push({ id: nextPlanIaId++, hora, empresa: String(empresa).slice(0, 120), tareas: String(tareas).slice(0, 2000), fechaDia: hoyStr, createdAt: Date.now() });
+  planSemanalIA[dia].sort((a, b) => (a.hora || '99:99').localeCompare(b.hora || '99:99'));
   saveState();
 }
 
@@ -1335,7 +1583,11 @@ async function crearTicketTecnico(mensaje, origen) {
   const ticket = {
     id: nextTicketId++,
     timestamp: Date.now(),
-    mensaje: truncate(String(mensaje || ''), 500),
+    // Ampliado de 500 a 4000: un ticket de errores reales de n8n necesita
+    // caber workflow+nodo+mensaje+id de ejecucion de varios fallos a la vez,
+    // para que el equipo tecnico (Claude Code) pueda ir directo al codigo
+    // sin tener que volver a investigar desde cero.
+    mensaje: truncate(String(mensaje || ''), 4000),
     origen: origen || 'desconocido',
     estado: 'pendiente',
   };
@@ -1397,7 +1649,7 @@ async function regenerarGmbPostChat(mensaje) {
   }
 
   const fecha = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' });
-  const systemPrompt = 'Eres el responsable de publicaciones de Google Business Profile (antes Google My Business) de negocios reales en Espana. Escribes en espanol de Espana, cercano, local, creible, NUNCA generico ni de relleno (prohibido "descubre", "no te lo pierdas", "la mejor opcion" sin contexto concreto). Las publicaciones de Google Business son cortas (maximo 1500 caracteres, ideal 400-700), directas, con una unica idea clara y un CTA de boton real de Google (elige uno de: RESERVAR, PEDIR_ONLINE, COMPRAR, MAS_INFORMACION, REGISTRARSE, LLAMAR). Devuelves SIEMPRE un unico objeto JSON valido, sin markdown, sin texto antes ni despues.';
+  const systemPrompt = 'Eres el responsable de publicaciones de Google Business Profile (antes Google My Business) de negocios reales en Espana. Escribes en espanol de Espana, cercano, local, creible, NUNCA generico ni de relleno (prohibido "descubre", "no te lo pierdas", "la mejor opcion" sin contexto concreto). Las publicaciones de Google Business son cortas (maximo 1500 caracteres, ideal 200-280), muy directas, estructura dolor-solucion-CTA, con una unica idea clara y un CTA de boton real de Google (elige uno de: RESERVAR, PEDIR_ONLINE, COMPRAR, MAS_INFORMACION, REGISTRARSE, LLAMAR). Devuelves SIEMPRE un unico objeto JSON valido, sin markdown, sin texto antes ni despues.';
   const userPrompt = 'Negocio: ' + perfil.nombre + '\n' +
     'Tipo de negocio: ' + perfil.tipo + '\n' +
     'Enfoque habitual: ' + perfil.enfoque + '\n' +
@@ -1405,7 +1657,7 @@ async function regenerarGmbPostChat(mensaje) {
     (elegido.instruccion ? ('Instruccion concreta del CEO para esta publicacion: ' + elegido.instruccion + '\n') : '') +
     '\nGenera UNA publicacion de Google Business real y publicable hoy, en JSON con esta estructura EXACTA:\n' +
     '{"titulo":"","texto":"","cta_boton":"","idea_foto":""}\n\n' +
-    'titulo: maximo 58 caracteres. texto: el cuerpo de la publicacion, 400-700 caracteres, una sola idea concreta. idea_foto: que foto real acompanaria esta publicacion.';
+    'titulo: maximo 58 caracteres. texto: SIEMPRE entre 200 y 280 caracteres (ni menos ni mas -- muy breve, 2-3 frases cortas, letra grande y legible dentro de una plantilla de imagen). Estructura obligatoria en ese orden: (1) nombra un dolor/problema real y concreto del cliente de este tipo de negocio, (2) la solucion directa que ofrece el negocio para ese dolor, (3) una llamada a la accion clara y directa (que encaje con el cta_boton elegido). Nada de relleno, nada de adjetivos vacios, directo al grano. idea_foto: describe la imagen en una frase lista para usarse directamente como prompt de generacion de imagen con IA (sujeto concreto, escena, estilo/ambiente) -- no una idea vaga, sino una instruccion clara de que imagen generar.';
 
   const generacion = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -1432,7 +1684,7 @@ async function regenerarGmbPostChat(mensaje) {
     if (gmbPosts.length > 300) gmbPosts.length = 300;
   }
   saveState();
-  upsertPlanSemanalIA(perfil.nombre, `Google Business: "${post.titulo}" (botón ${post.ctaBoton}) -- pendiente de publicar manual`);
+  upsertPlanSemanalIA(perfil.nombre, `${post.titulo}\n\n${post.texto}\n📷 ${post.ideaFoto}`);
   return { ok: true, negocio: perfil.nombre, post };
 }
 
@@ -1641,7 +1893,10 @@ async function dispararAutomatizacionReal(entry) {
       const opciones = { method: regla.method || 'GET', signal: AbortSignal.timeout(30000) };
       if (opciones.method === 'POST') {
         opciones.headers = { 'Content-Type': 'application/json' };
-        opciones.body = JSON.stringify({ tema: texto, ordenReal: true });
+        const marcaSolicitada = detectarMarcaExplicita(texto);
+        const cuerpoPost = { tema: texto, ordenReal: true };
+        if (marcaSolicitada) cuerpoPost.marcaSolicitada = marcaSolicitada;
+        opciones.body = JSON.stringify(cuerpoPost);
       }
       const respuesta = await fetch(N8N_BASE + regla.path, opciones);
       let cuerpo = null;
@@ -1720,6 +1975,16 @@ function resumirResultadoAutomatizacion(r) {
     if (!cuerpo.ok) return `no se ha podido añadir el servicio: ${cuerpo.error}`;
     return `añadido a "${cuerpo.cliente.nombre}": ${cuerpo.servicios.join(', ')} -- avisado el equipo de ${cuerpo.equipos.join(' y ')} para que lo arranque`;
   }
+  if (r.intento === 'estado_equipo_ahora') {
+    if (!cuerpo.departamentos || !cuerpo.departamentos.length) return `no hay ningun trabajador con actividad real registrada en las ultimas 2 horas (de ${cuerpo.totalRegistrados || 0} agentes en total)`;
+    const partes = cuerpo.departamentos.map((d) => `${d.departamento} (${d.total}): ${d.ejemplos}`);
+    return `${cuerpo.totalActivos} trabajador(es) con actividad real ahora mismo -> ${partes.join(' | ')}`;
+  }
+  if (r.intento === 'publicar_media_subida') {
+    if (!cuerpo.ok) return `no se ha podido publicar el archivo subido: ${cuerpo.error}`;
+    const m = cuerpo.media || {};
+    return `publicacion real disparada con el ${m.tipo === 'video' ? 'video' : 'imagen'} que subiste (${m.nombreOriginal || 'archivo'}) -> "${(cuerpo.caption || '').slice(0, 150)}..."`;
+  }
   if (r.intento === 'metricas_redes') {
     const partes = (cuerpo.cuentas || []).map((c) => {
       if (c.error) return `${c.cuenta}: error consultando (${c.error})`;
@@ -1730,6 +1995,16 @@ function resumirResultadoAutomatizacion(r) {
       return `${c.cuenta}: última pieza (${p.tipo}, ${p.fecha.slice(0, 10)}) con ${p.alcance} de alcance y ${p.vistas} vistas; media de las últimas ${posts.length} publicaciones: ${media.toFixed(1)} de alcance`;
     });
     return `métricas reales ahora mismo -> ${partes.join(' | ')}`;
+  }
+  if (r.intento === 'consultar_calendario_redes') {
+    const describe = (c) => `${c.fecha} -> ${c.marca} (${(c.formatos || []).join('+') || 'sin formato'}${c.mejorHora ? `, ${c.mejorHora}` : ''})${c.resumen ? `: ${c.resumen.slice(0, 100)}` : ''}`;
+    if (!cuerpo.totalProgramadas) return 'el calendario de contenido esta vacio ahora mismo, no hay ninguna publicacion programada guardada todavia';
+    const partes = [];
+    partes.push(cuerpo.hoy ? `hoy (${cuerpo.hoyStr}) toca -> ${describe(cuerpo.hoy)}` : `hoy (${cuerpo.hoyStr}) no hay nada programado en el calendario`);
+    if (cuerpo.proximas && cuerpo.proximas.length) {
+      partes.push(`próximas: ${cuerpo.proximas.map(describe).join(' | ')}`);
+    }
+    return partes.join(' -- ');
   }
   return null;
 }
@@ -1979,6 +2254,9 @@ function renderStatusHtml() {
 
 function inferDepartment(agent) {
   const text = `${agent.agent || ''} ${agent.name || ''}`.toLowerCase();
+  if (/^tecnico_|soporte t[eé]cnico/.test(text)) return 'tecnico';
+  if (/google_ads|ads_google/.test(text)) return 'ads_google';
+  if (/meta_ads|ads_meta/.test(text)) return 'ads_meta';
   if (/(director|ceo|gerencia|admin)/.test(text)) return 'direccion';
   if (/(scraper|scrape)/.test(text)) return 'scraper';
   if (/(community|social|redes|instagram|tiktok|youtube|content)/.test(text)) return 'community';
@@ -2383,14 +2661,17 @@ ${renderSidebarHtml('office')}
       </div>
       <div class="field">
         <label for="message">Instrucción</label>
-        <textarea id="message" placeholder="Ej: prepara 3 ideas para Google Business de Terapia de Masajes y prioriza una publicación esta semana"></textarea>
+        <textarea id="message" placeholder="Ej: prepara 3 ideas para Google Business de Terapia de Masajes y prioriza una publicación esta semana. Para publicar una foto/video propio, adjuntalo con el clip y escribe 'publica esto'."></textarea>
       </div>
+      <input type="file" id="command-media-input" accept="image/*,video/*" style="display:none">
       <div class="button-row">
         <button class="btn-gold" id="send-command">Enviar instrucción</button>
         <button class="btn-dark" id="fill-global">Prioridad global</button>
         <button class="btn-dark" id="fill-social">Orden a redes</button>
         <button class="btn-dark" id="fill-tecnico">🔧 Aviso a Técnicos</button>
+        <button class="btn-dark" id="command-media-clip" type="button" title="Adjuntar una foto o video para publicar en redes sociales">📎 Adjuntar foto/video</button>
       </div>
+      <div class="command-status" id="command-media-status">Sin archivo adjunto.</div>
       <div class="command-status" id="command-status">Listo para enviar órdenes.</div>
       <div id="command-reply"></div>
     </div>
@@ -2398,11 +2679,14 @@ ${renderSidebarHtml('office')}
       <h3>Chat directo con la IA (soporte)</h3>
       <div class="events-list" id="ceo-chat-log" style="max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;"></div>
       <div class="field" style="margin-top:10px">
-        <textarea id="ceo-chat-input" placeholder="Pregunta algo o pide ayuda para resolver un imprevisto..." rows="2"></textarea>
+        <textarea id="ceo-chat-input" placeholder="Pregunta algo, pide ayuda, o adjunta una foto/video y escribe 'publica esto'..." rows="2"></textarea>
       </div>
+      <input type="file" id="ceo-media-input" accept="image/*,video/*" style="display:none">
       <div class="button-row">
         <button class="btn-gold" id="ceo-chat-send">Enviar</button>
+        <button class="btn-dark" id="ceo-media-clip" type="button" title="Adjuntar una foto o video para publicar en redes">📎 Adjuntar foto/video</button>
       </div>
+      <div class="command-status" id="ceo-media-status">Sin archivo adjunto.</div>
       <div class="command-status" id="ceo-chat-status">Listo para hablar.</div>
     </div>
     <div class="panel command-card">
@@ -2496,6 +2780,8 @@ function escapeHtml(value){
 }
 const ZONES=[
   {key:'direccion',title:'Dirección',tag:'CEO / Control'},
+  {key:'ads_google',title:'Google Ads',tag:'Búsqueda / Display'},
+  {key:'ads_meta',title:'Meta Ads',tag:'Facebook / Instagram'},
   {key:'community',title:'Community & Redes',tag:'Contenido'},
   {key:'comerciales',title:'Comerciales',tag:'Ventas'},
   {key:'scraper',title:'Scrapers e Investigación',tag:'Leads'},
@@ -2509,6 +2795,8 @@ const ZONES=[
 function inferDepartment(agent){
   const text=(String(agent.agent||'')+' '+String(agent.name||'')).toLowerCase();
   if (/^tecnico_|soporte t[eé]cnico/.test(text)) return 'tecnico';
+  if (/google_ads|ads_google/.test(text)) return 'ads_google';
+  if (/meta_ads|ads_meta/.test(text)) return 'ads_meta';
   if (/(director|ceo|gerencia|admin)/.test(text)) return 'direccion';
   if (/(scraper|scrape)/.test(text)) return 'scraper';
   if (/(community|social|redes|instagram|tiktok|youtube|content)/.test(text)) return 'community';
@@ -2880,14 +3168,11 @@ function renderCommandReply(data){
   const ackHtml=data.respuestaInmediata
     ? ('<div class="reply-card" style="border-color:'+ackBorder+'"><div class="reply-card-sub"><strong>'+ackIcon+'</strong> '+escapeHtml(data.respuestaInmediata)+'</div></div>')
     : '';
-  const executions=[];
-  if(data.socialExecution) executions.push({exec:data.socialExecution,kind:'Ejecución de redes'});
-  (data.workExecutions||[]).forEach(exec=>executions.push({exec,kind:'Ejecución de equipo'}));
-  if(!executions.length){
-    box.innerHTML=ackHtml+'<div class="reply-card"><div class="reply-card-sub">Instrucción guardada, pero no coincide con ningún equipo con ejecución activa todavía.</div></div>';
-    return;
-  }
-  box.innerHTML=ackHtml+executions.map(({exec,kind})=>renderReplyCard(exec,kind)).join('');
+  // socialExecution/workExecutions ya no se fabrican (2026-09-08, ver
+  // pushInstruction en el servidor) -- respuestaInmediata (mostrada en
+  // ackHtml arriba) es la unica confirmacion real, no hace falta ninguna
+  // tarjeta extra de "ejecucion" simulada.
+  box.innerHTML=ackHtml||'<div class="reply-card"><div class="reply-card-sub">Instrucción guardada.</div></div>';
 }
 async function sendInstruction(){
   const scope=document.getElementById('scope').value||'global';
@@ -2985,6 +3270,84 @@ function bindCeoChatPanel() {
   if (btn) btn.addEventListener('click', enviarCeoChat);
   if (input) input.addEventListener('keydown', function(e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); enviarCeoChat(); }
+  });
+  bindCeoMediaClip();
+}
+function leerArchivoComoBase64(file) {
+  return new Promise(function(resolve, reject) {
+    const reader = new FileReader();
+    reader.onload = function() { resolve(String(reader.result).split(',')[1] || ''); };
+    reader.onerror = function() { reject(new Error('no se pudo leer el archivo')); };
+    reader.readAsDataURL(file);
+  });
+}
+async function subirMediaCeo(file) {
+  const status = document.getElementById('ceo-media-status');
+  const token = (localStorage.getItem('ceo-panel-token') || '').trim();
+  if (!token) { status.textContent = 'Falta el token del CEO (guardalo arriba primero).'; return; }
+  if (!file) return;
+  const maxBytes = 60 * 1024 * 1024;
+  if (file.size > maxBytes) { status.textContent = 'Archivo demasiado grande (maximo 60MB).'; return; }
+  status.textContent = 'Subiendo ' + file.name + '...';
+  try {
+    const b64 = await leerArchivoComoBase64(file);
+    const response = await fetch('/api/media-upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-ceo-token': token },
+      body: JSON.stringify({ media_b64: b64, mime_type: file.type || 'application/octet-stream', nombre: file.name }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || 'Error desconocido subiendo el archivo');
+    status.textContent = 'Listo: "' + file.name + '" subido -- ahora escribe algo como "publica esto" en el chat y envialo.';
+  } catch (err) {
+    status.textContent = 'Error subiendo el archivo: ' + err.message;
+  }
+}
+async function subirMediaComandoPanel(file) {
+  const status = document.getElementById('command-media-status');
+  const token = (localStorage.getItem('ceo-panel-token') || '').trim();
+  if (!token) { status.textContent = 'Falta el token del CEO (guardalo arriba primero).'; return; }
+  if (!file) return;
+  const maxBytes = 60 * 1024 * 1024;
+  if (file.size > maxBytes) { status.textContent = 'Archivo demasiado grande (maximo 60MB).'; return; }
+  status.textContent = 'Subiendo ' + file.name + '...';
+  try {
+    const b64 = await leerArchivoComoBase64(file);
+    const response = await fetch('/api/media-upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-ceo-token': token },
+      body: JSON.stringify({ media_b64: b64, mime_type: file.type || 'application/octet-stream', nombre: file.name }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || 'Error desconocido subiendo el archivo');
+    status.textContent = 'Listo: "' + file.name + '" subido.';
+    const messageBox = document.getElementById('message');
+    if (messageBox && !messageBox.value.trim()) messageBox.value = 'Publica esto en redes sociales.';
+    if (messageBox) messageBox.focus();
+  } catch (err) {
+    status.textContent = 'Error subiendo el archivo: ' + err.message;
+  }
+}
+function bindCommandMediaClip() {
+  const clipBtn = document.getElementById('command-media-clip');
+  const fileInput = document.getElementById('command-media-input');
+  if (!clipBtn || !fileInput) return;
+  clipBtn.addEventListener('click', function() { fileInput.click(); });
+  fileInput.addEventListener('change', function() {
+    const file = fileInput.files && fileInput.files[0];
+    if (file) subirMediaComandoPanel(file);
+    fileInput.value = '';
+  });
+}
+function bindCeoMediaClip() {
+  const clipBtn = document.getElementById('ceo-media-clip');
+  const fileInput = document.getElementById('ceo-media-input');
+  if (!clipBtn || !fileInput) return;
+  clipBtn.addEventListener('click', function() { fileInput.click(); });
+  fileInput.addEventListener('change', function() {
+    const file = fileInput.files && fileInput.files[0];
+    if (file) subirMediaCeo(file);
+    fileInput.value = '';
   });
 }
 async function refreshSocialExecutions(){
@@ -3206,6 +3569,7 @@ function bindCommandPanel(){
     renderTargetPicker(OFFICE_AGENTS_CACHE);
     document.getElementById('message').focus();
   };
+  bindCommandMediaClip();
   if(quickCommunity) quickCommunity.onclick=()=>{
     document.getElementById('scope').value='team';
     document.getElementById('target').value='community';
@@ -4021,8 +4385,8 @@ p,span{color:#b8b8c3;line-height:1.6}
 .empresa-titulo{font-weight:800;color:#d4af37;font-size:15px;padding-bottom:6px;border-bottom:1px solid rgba(212,175,55,.25)}
 .empresa-cabecera{display:grid;grid-template-columns:repeat(7,minmax(150px,1fr));gap:8px}
 .empresa-cabecera .dia-titulo{background:rgba(255,255,255,.04);border-radius:10px;padding:6px 8px;text-align:center;font-size:11px}
-.empresa-fila{display:grid;grid-template-columns:repeat(7,minmax(150px,1fr));gap:8px;align-items:stretch}
-.dia-celda{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:10px;padding:6px;min-height:56px;max-height:180px;overflow-y:auto;display:flex;flex-direction:column;gap:4px}
+.empresa-fila{display:grid;grid-template-columns:repeat(7,minmax(150px,1fr));gap:8px;align-items:start}
+.dia-celda{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:10px;padding:6px;min-height:56px;overflow-x:hidden;display:flex;flex-direction:column;gap:4px}
 .dia-celda .card{padding:6px 8px}
 .dia-celda-vacia{opacity:.25;font-size:11px;text-align:center;padding-top:14px}
 .dia-titulo{font-weight:800;color:#d4af37;font-size:14px;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid rgba(212,175,55,.2);padding-bottom:6px;margin-bottom:2px}
@@ -4031,6 +4395,23 @@ p,span{color:#b8b8c3;line-height:1.6}
 .card .empresa{font-weight:700;color:#f3f3f5;margin-bottom:2px}
 .card .tareas{color:#b8b8c3;white-space:pre-wrap}
 .card .borrar{float:right;color:#ff6b6b;cursor:pointer;font-size:11px;font-weight:700}
+.card .copiar{float:right;color:#8a8a95;cursor:pointer;font-size:11px;font-weight:700;margin-right:8px;background:none;border:none;padding:0;font-family:inherit}
+.card .copiar:hover{color:#d4af37}
+.card .copiar.copiado{color:#23d18b}
+.leads-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;margin-top:4px}
+.lead-card{background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:10px 12px;font-size:12.5px}
+.lead-nombre{font-weight:700;color:#f3f3f5;margin-bottom:2px}
+.lead-meta{color:#8a8a95;font-size:11px;margin-bottom:6px}
+.lead-tel-row{display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap}
+.lead-tel{color:#d4af37;font-weight:700}
+.lead-tel-row .copiar{background:rgba(212,175,55,.12);border:1px solid rgba(212,175,55,.3);color:#d4af37;border-radius:6px;padding:2px 10px;font-size:10.5px;font-weight:700;cursor:pointer;font-family:inherit}
+.lead-tel-row .copiar:hover{background:rgba(212,175,55,.22)}
+.lead-tel-row .copiar.copiado{color:#23d18b;border-color:rgba(35,209,139,.4);background:rgba(35,209,139,.12)}
+.lead-dir{color:#b8b8c3;font-size:11.5px;margin-bottom:2px}
+.lead-web{color:#8a8a95;font-size:11px;word-break:break-all}
+.leads-paginacion{display:flex;align-items:center;gap:12px;justify-content:center;margin-top:14px;color:#b8b8c3;font-size:12.5px;flex-wrap:wrap}
+.leads-paginacion button{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:#f3f3f5;border-radius:8px;padding:6px 14px;cursor:pointer;font-family:inherit}
+.leads-paginacion button:disabled{opacity:.35;cursor:default}
 .check-item{display:flex;align-items:flex-start;gap:6px;background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:6px 8px;font-size:12.5px;cursor:pointer}
 .check-item.hecho{opacity:.5}
 .check-item.hecho .texto{text-decoration:line-through}
@@ -4074,6 +4455,7 @@ ${renderSidebarHtml('calendario')}
       <button class="tab-btn" data-tab="redes" onclick="cambiarTab('redes')">Redes sociales</button>
       <button class="tab-btn" data-tab="manual" onclick="cambiarTab('manual')">Mis tareas manuales</button>
       <button class="tab-btn" data-tab="precios" onclick="cambiarTab('precios')">Servicios y precios</button>
+      <button class="tab-btn" data-tab="llamadas" onclick="cambiarTab('llamadas')">Llamadas</button>
     </div>
 
     <div id="tab-ia">
@@ -4113,6 +4495,17 @@ ${renderSidebarHtml('calendario')}
         <button class="btn-gold" onclick="anadirServicio()">+ Añadir servicio</button>
       </div>
     </div>
+
+    <div id="tab-llamadas" class="hidden">
+      <p>Todos los leads reales del scraper (Nombre, teléfono, dirección), organizados por categoría y ciudad, para llamar sin salir de la oficina.</p>
+      <div class="form-row" style="margin-bottom:12px;gap:10px">
+        <input type="text" id="leads-categoria" list="leads-categorias-lista" placeholder="Buscar categoría (ej: inmobiliaria)..." autocomplete="off" oninput="cargarCiudadesLeads();buscarLeads(1)" style="flex:1;min-width:220px">
+        <datalist id="leads-categorias-lista"></datalist>
+        <select id="leads-ciudad" onchange="buscarLeads(1)" style="flex:1;min-width:180px"><option value="">Todas las ciudades</option></select>
+      </div>
+      <div id="leads-resultados" class="leads-grid"></div>
+      <div id="leads-paginacion" class="leads-paginacion"></div>
+    </div>
   </div>
 </div>
 
@@ -4122,16 +4515,74 @@ const LABEL = ${JSON.stringify(diasLabel)};
 let DATA = { planSemanalIA: {}, planSemanalRedes: {}, tareasManuales: {} };
 let PRECIOS = [];
 
+let leadsInicializado = false;
 function cambiarTab(t) {
   document.getElementById('tab-ia').classList.toggle('hidden', t !== 'ia');
   document.getElementById('tab-redes').classList.toggle('hidden', t !== 'redes');
   document.getElementById('tab-manual').classList.toggle('hidden', t !== 'manual');
   document.getElementById('tab-precios').classList.toggle('hidden', t !== 'precios');
+  document.getElementById('tab-llamadas').classList.toggle('hidden', t !== 'llamadas');
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
+  if (t === 'llamadas' && !leadsInicializado) {
+    leadsInicializado = true;
+    cargarCategoriasLeads().then(() => buscarLeads(1));
+  }
+}
+
+async function cargarCategoriasLeads() {
+  const r = await fetch('/api/leads/categorias');
+  if (!r.ok) return;
+  const d = await r.json();
+  const lista = document.getElementById('leads-categorias-lista');
+  lista.innerHTML = d.categorias.map(c => '<option value="' + esc(c.categoria) + '">' + esc(c.categoria) + ' (' + c.count + ')</option>').join('');
+  const input = document.getElementById('leads-categoria');
+  input.placeholder = 'Buscar categoría (ej: inmobiliaria)... -- ' + d.total + ' leads en total';
+}
+
+async function cargarCiudadesLeads() {
+  const categoria = document.getElementById('leads-categoria').value;
+  const r = await fetch('/api/leads/ciudades?categoria=' + encodeURIComponent(categoria));
+  if (!r.ok) return;
+  const d = await r.json();
+  const sel = document.getElementById('leads-ciudad');
+  sel.innerHTML = '<option value="">Todas las ciudades</option>' +
+    d.ciudades.map(c => '<option value="' + esc(c.ciudad) + '">' + esc(c.ciudad) + ' (' + c.count + ')</option>').join('');
+}
+
+async function buscarLeads(pagina) {
+  const categoria = document.getElementById('leads-categoria').value;
+  const ciudad = document.getElementById('leads-ciudad').value;
+  const params = new URLSearchParams({ categoria, ciudad, page: String(pagina || 1), limit: '50' });
+  const r = await fetch('/api/leads?' + params.toString());
+  if (!r.ok) return;
+  const d = await r.json();
+  pintarLeads(d);
+}
+
+function pintarLeads(d) {
+  const cont = document.getElementById('leads-resultados');
+  if (!d.leads.length) {
+    cont.innerHTML = '<p style="color:#6b6b78">Sin resultados para este filtro.</p>';
+    document.getElementById('leads-paginacion').innerHTML = '';
+    return;
+  }
+  cont.innerHTML = d.leads.map(l => '<div class="lead-card">' +
+    '<div class="lead-nombre">' + esc(l.nombre) + '</div>' +
+    '<div class="lead-meta">' + esc(l.categoria) + ' · ' + esc(l.ciudad) + '</div>' +
+    '<div class="lead-tel-row"><span class="lead-tel">' + esc(l.telefono) + '</span>' +
+    '<button type="button" class="copiar" data-texto="' + esc(l.telefono) + '" onclick="copiarTexto(this)">Copiar</button></div>' +
+    (l.direccion ? '<div class="lead-dir">' + esc(l.direccion) + '</div>' : '') +
+    (l.web ? '<a class="lead-web" href="' + esc(l.web) + '" target="_blank" rel="noopener">' + esc(l.web) + '</a>' : '') +
+    '</div>').join('');
+  const totalPaginas = Math.max(1, Math.ceil(d.total / d.limit));
+  document.getElementById('leads-paginacion').innerHTML =
+    '<button' + (d.page <= 1 ? ' disabled' : '') + ' onclick="buscarLeads(' + (d.page - 1) + ')">← Anterior</button>' +
+    '<span>Página ' + d.page + ' de ' + totalPaginas + ' (' + d.total + ' resultados)</span>' +
+    '<button' + (d.page >= totalPaginas ? ' disabled' : '') + ' onclick="buscarLeads(' + (d.page + 1) + ')">Siguiente →</button>';
 }
 
 function esc(s) {
-  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 async function cargar() {
@@ -4151,6 +4602,29 @@ function cabeceraDias() {
   return \`<div class="empresa-cabecera">\${DIAS.map(dia => \`<div class="dia-titulo">\${LABEL[dia]}</div>\`).join('')}</div>\`;
 }
 
+async function copiarTexto(btn) {
+  const texto = btn.getAttribute('data-texto') || '';
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(texto);
+    ok = true;
+  } catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = texto;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); ok = true; } catch (e2) { ok = false; }
+    document.body.removeChild(ta);
+  }
+  if (!ok) return;
+  const original = btn.textContent;
+  btn.textContent = 'Copiado';
+  btn.classList.add('copiado');
+  setTimeout(() => { btn.textContent = original; btn.classList.remove('copiado'); }, 1200);
+}
+
 function pintarIA() {
   const grid = document.getElementById('grid-ia');
   const plan = DATA.planSemanalIA || {};
@@ -4160,6 +4634,7 @@ function pintarIA() {
       const items = (plan[dia] || []).filter(it => it.empresa === empresa);
       const cards = items.map(it => \`<div class="card">
         <span class="borrar" onclick="borrarIA('\${dia}',\${it.id})">✕</span>
+        <button type="button" class="copiar" data-texto="\${esc(it.tareas)}" onclick="copiarTexto(this)">Copiar</button>
         \${it.hora ? '<span class="hora">' + esc(it.hora) + '</span>' : ''}
         <div class="tareas">\${esc(it.tareas)}</div>
       </div>\`).join('');
@@ -4183,6 +4658,7 @@ function pintarRedes() {
       const items = (plan[dia] || []).filter(it => it.marca === marca);
       const cards = items.map(it => \`<div class="card">
         <span class="borrar" onclick="borrarRedes('\${dia}',\${it.id})">✕</span>
+        <button type="button" class="copiar" data-texto="\${esc(it.resumen)}" onclick="copiarTexto(this)">Copiar</button>
         \${it.hora ? '<span class="hora">' + esc(it.hora) + '</span>' : ''}\${it.tipo ? '<span class="tipo">' + esc(TIPO_LABEL[it.tipo] || it.tipo) + '</span>' : ''}
         \${it.cuenta ? '<div style="color:#8a8a95;font-size:10.5px">' + esc(it.cuenta) + '</div>' : ''}
         <div class="tareas">\${esc(it.resumen)}</div>
@@ -4497,9 +4973,10 @@ function renderManualHtml() {
     estado_auditorias: 'Cuantas auditorias gratuitas hay pendientes y cuantas con cita?',
     lanzar_llamadas: 'Lanza ya el lote de llamadas de ventas.',
     metricas_redes: 'Dame las metricas reales de las ultimas publicaciones.',
+    publicar_media_subida: 'Publica el video/foto que acabo de subir.',
   };
   const CATEGORIAS_AUTOMATIZACION = [
-    { titulo: 'Publicar contenido', intentos: ['publicar_instagram', 'publicar_flyer', 'publicar_reel', 'publicar_historia', 'generar_contenido', 'generar_imagen', 'ideas_virales'] },
+    { titulo: 'Publicar contenido', intentos: ['publicar_instagram', 'publicar_flyer', 'publicar_reel', 'publicar_historia', 'publicar_media_subida', 'generar_contenido', 'generar_imagen', 'ideas_virales'] },
     { titulo: 'Google Business', intentos: ['gmb_contenido', 'gmb_resumen_diario'] },
     { titulo: 'Auditorías y seguridad', intentos: ['auditoria_seo', 'auditoria_web', 'auditoria_web_cliente', 'auditoria_empresa', 'pentest_seguridad', 'plugfyguard_vigilancia'] },
     { titulo: 'Vigilancia y errores', intentos: ['revisar_errores_n8n', 'vigilancia_alertas', 'revisar_correos'] },
@@ -4850,6 +5327,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/login') {
+    // Login automatico por token (para la app/APK privada del CEO): si la
+    // URL trae ?token=CEO_PANEL_TOKEN se crea sesion de navegador directamente,
+    // sin pedir email/contraseña. Mismo token que ya usa la API (isAuthorized).
+    const tokenParam = url.searchParams.get('token');
+    if (tokenParam && ceoPanelToken && tokenParam === ceoPanelToken) {
+      const sessionId = createSession();
+      res.writeHead(302, {
+        Location: '/office',
+        'Set-Cookie': `${SESSION_COOKIE}=${sessionId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+      });
+      res.end();
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(renderLoginHtml(url.searchParams.get('error')));
     return;
@@ -5022,6 +5512,132 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/api/business-metrics') {
     json(res, 200, { businessMetrics: publicBusinessMetrics() });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/leads/recargar') {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    cargarLeads();
+    json(res, 200, { ok: true, total: leadsData.length });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/ads-borradores') {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      if (!payload.negocio || !payload.plataforma) {
+        json(res, 400, { error: 'faltan campos: negocio, plataforma' });
+        return;
+      }
+      const borrador = {
+        id: nextAdsBorradorId++,
+        plataforma: String(payload.plataforma).slice(0, 20),
+        negocio: String(payload.negocio).slice(0, 120),
+        objetivo: String(payload.objetivo || '').slice(0, 300),
+        estrategia: payload.estrategia || {},
+        keywords: payload.keywords || null,
+        audiencias: payload.audiencias || null,
+        copy: payload.copy || {},
+        creativo: payload.creativo || {},
+        presupuesto: payload.presupuesto || {},
+        estado: 'pendiente_revision',
+        createdAt: Date.now(),
+      };
+      adsBorradores.unshift(borrador);
+      if (adsBorradores.length > 200) adsBorradores.length = 200;
+      saveState();
+      json(res, 200, { ok: true, borrador });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/ads-borradores') {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    json(res, 200, { adsBorradores });
+    return;
+  }
+
+  if (req.method === 'POST' && /^\/api\/ads-borradores\/\d+\/(aprobar|rechazar)$/.test(url.pathname)) {
+    if (!isLoggedIn(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const match = url.pathname.match(/^\/api\/ads-borradores\/(\d+)\/(aprobar|rechazar)$/);
+    const id = Number(match[1]);
+    const accion = match[2];
+    const borrador = adsBorradores.find((b) => b.id === id);
+    if (!borrador) {
+      json(res, 404, { error: 'Borrador no encontrado' });
+      return;
+    }
+    borrador.estado = accion === 'aprobar' ? 'aprobado' : 'rechazado';
+    borrador.decididoAt = Date.now();
+    saveState();
+    json(res, 200, { ok: true, borrador });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/leads/categorias') {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const cuenta = {};
+    for (const l of leadsData) cuenta[l.categoria] = (cuenta[l.categoria] || 0) + 1;
+    const categorias = Object.entries(cuenta)
+      .map(([categoria, count]) => ({ categoria, count }))
+      .sort((a, b) => b.count - a.count);
+    json(res, 200, { categorias, total: leadsData.length });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/leads/ciudades') {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const categoria = (url.searchParams.get('categoria') || '').toLowerCase();
+    const cuenta = {};
+    for (const l of leadsData) {
+      if (categoria && !l.categoria.toLowerCase().includes(categoria)) continue;
+      cuenta[l.ciudad] = (cuenta[l.ciudad] || 0) + 1;
+    }
+    const ciudades = Object.entries(cuenta)
+      .map(([ciudad, count]) => ({ ciudad, count }))
+      .sort((a, b) => b.count - a.count);
+    json(res, 200, { ciudades });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/leads') {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const categoria = (url.searchParams.get('categoria') || '').toLowerCase();
+    const ciudad = url.searchParams.get('ciudad') || '';
+    const page = Math.max(1, Number(url.searchParams.get('page')) || 1);
+    const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 50));
+    let filtrados = leadsData;
+    if (categoria) filtrados = filtrados.filter((l) => l.categoria.toLowerCase().includes(categoria));
+    if (ciudad) filtrados = filtrados.filter((l) => l.ciudad === ciudad);
+    const total = filtrados.length;
+    const start = (page - 1) * limit;
+    const leads = filtrados.slice(start, start + limit);
+    json(res, 200, { leads, total, page, limit });
     return;
   }
 
@@ -5392,6 +6008,21 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Endpoint de solo lectura, con token de automatizacion, para que los
+  // workflows de revision de copy (Copy Social Senior) puedan leer el
+  // contenido real programado de hoy sin necesitar sesion de login.
+  if (req.method === 'GET' && url.pathname === '/api/plan-semanal/redes-hoy') {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const dia = DIAS_SEMANA[(new Date().getDay() + 6) % 7];
+    const hoyStr = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' });
+    const items = (planSemanalRedes[dia] || []).filter((it) => it.fechaDia === hoyStr);
+    json(res, 200, { items });
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/plan-semanal') {
     if (!isLoggedIn(req)) {
       json(res, 401, { error: 'Unauthorized' });
@@ -5424,6 +6055,12 @@ const server = http.createServer(async (req, res) => {
         fechaDia: new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Madrid' }),
         createdAt: Date.now(),
       };
+      // Mismo bug que en /api/plan-semanal/ia (ver comentario alli):
+      // se reemplaza la entrada previa de esa marca+tipo en ese dia de la
+      // semana (de cualquier semana anterior) en vez de acumularla -- una
+      // marca puede tener un reel y un flyer el mismo dia (tipos distintos),
+      // asi que la clave de reemplazo es marca+tipo, no solo marca.
+      planSemanalRedes[dia] = planSemanalRedes[dia].filter((it) => !(it.marca === entrada.marca && it.tipo === entrada.tipo));
       planSemanalRedes[dia].push(entrada);
       planSemanalRedes[dia].sort((a, b) => (a.hora || '99:99').localeCompare(b.hora || '99:99'));
       saveState();
@@ -5457,6 +6094,67 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Subida manual de imagen/video (avatar Gemini, foto propia, etc.) desde el
+  // panel del CEO -- sube al mismo sitio real que ya usan los 4 generadores
+  // (vmscontent/v1/imagen-directa en WordPress, URL publica real), y queda
+  // guardado en mediaSubida[] para poder pedirle a la oficina que lo publique
+  // despues sin tener que volver a subirlo.
+  if (req.method === 'POST' && url.pathname === '/api/media-upload') {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    if (!VMSCONTENT_KEY) {
+      json(res, 500, { error: 'VMSCONTENT_KEY no configurada en el .env -- no se puede subir a WordPress' });
+      return;
+    }
+    try {
+      const body = await readBody(req, 90 * 1024 * 1024);
+      const payload = JSON.parse(body || '{}');
+      if (!payload.media_b64) {
+        json(res, 400, { error: 'falta media_b64' });
+        return;
+      }
+      const mimeType = String(payload.mime_type || 'application/octet-stream').slice(0, 60);
+      const nombre = 'manual-' + Date.now() + '-' + String(payload.nombre || 'archivo').replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 60);
+      const wpRes = await fetch('https://virtualmarketingspain.com/wp-json/vmscontent/v1/imagen-directa', {
+        method: 'POST',
+        headers: { 'X-VMSCONTENT-KEY': VMSCONTENT_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_b64: payload.media_b64, mime_type: mimeType, nombre_asset: nombre }),
+      });
+      const wpData = await wpRes.json().catch(() => ({}));
+      if (!wpRes.ok || !wpData.url) {
+        json(res, 502, { error: 'WordPress no devolvio una URL real', detalle: wpData });
+        return;
+      }
+      const entrada = {
+        id: nextMediaSubidaId++,
+        url: wpData.url,
+        mimeType,
+        tipo: mimeType.startsWith('video/') ? 'video' : 'imagen',
+        nombreOriginal: String(payload.nombre || '').slice(0, 200),
+        publicado: false,
+        createdAt: Date.now(),
+      };
+      mediaSubida.unshift(entrada);
+      if (mediaSubida.length > 50) mediaSubida.pop();
+      saveState();
+      json(res, 200, { ok: true, entrada });
+    } catch (error) {
+      json(res, 400, { error: String(error.message || error) });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/media-subida') {
+    if (!isLoggedInOrAutomation(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    json(res, 200, { mediaSubida: mediaSubida.slice(0, 20) });
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/plan-semanal/ia') {
     if (!isLoggedInOrAutomation(req)) {
       json(res, 401, { error: 'Unauthorized' });
@@ -5477,6 +6175,14 @@ const server = http.createServer(async (req, res) => {
         tareas: String(payload.tareas || '').slice(0, 2000),
         createdAt: Date.now(),
       };
+      // Bug real corregido (2026-09-16): este endpoint solo empujaba,
+      // nunca reemplazaba -- el generador semanal (GMBContenidoSemanal001)
+      // lo llama una vez por semana para cada dia+empresa, y como el array
+      // esta indexado por NOMBRE de dia de la semana (se repite cada
+      // semana), cada ejecucion se sumaba a las anteriores en vez de
+      // sustituirlas. Ahora se quita cualquier entrada previa de esa
+      // empresa en ese dia de la semana antes de anadir la nueva.
+      planSemanalIA[dia] = planSemanalIA[dia].filter((it) => it.empresa !== entrada.empresa);
       planSemanalIA[dia].push(entrada);
       planSemanalIA[dia].sort((a, b) => (a.hora || '99:99').localeCompare(b.hora || '99:99'));
       saveState();
@@ -5784,7 +6490,7 @@ const server = http.createServer(async (req, res) => {
         if (gmbPosts.length > 300) gmbPosts.length = 300;
       }
       saveState();
-      upsertPlanSemanalIA(post.negocio, `Google Business: "${post.titulo}" (botón ${post.ctaBoton}) -- pendiente de publicar manual`);
+      upsertPlanSemanalIA(post.negocio, `${post.titulo}\n\n${post.texto}\n📷 ${post.ideaFoto}`);
       json(res, 200, { ok: true, post });
     } catch (error) {
       json(res, 400, { error: String(error.message || error) });
@@ -5923,6 +6629,71 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, { ok: true, agent: { ...agent, lastSeen: undefined } });
     } catch {
       json(res, 400, { error: 'Invalid JSON body' });
+    }
+    return;
+  }
+
+  // Endpoint dedicado para que automatizaciones reales (ej. el vigilante de
+  // errores de n8n, RevisarErroresN8N001) creen un ticket tecnico real
+  // directamente, sin pasar por el chat del CEO ni depender de que la IA
+  // clasifique el mensaje -- asi un error real de cualquier flujo llega
+  // siempre al equipo tecnico (Claude Code) de forma automatica, no solo
+  // por email. Mismo token que el heartbeat, ya usado por estas mismas
+  // automatizaciones.
+  if (req.method === 'POST' && url.pathname === '/api/tickets/crear') {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      if (!payload.mensaje) {
+        json(res, 400, { error: 'Missing required field: mensaje' });
+        return;
+      }
+      const ticket = await crearTicketTecnico(payload.mensaje, payload.origen || 'automatizacion');
+      json(res, 200, { ok: true, ticket });
+    } catch (err) {
+      json(res, 400, { error: 'Invalid JSON body: ' + String(err && err.message || err) });
+    }
+    return;
+  }
+
+  // Endpoints gemelos a /api/tickets/crear (mismo token de heartbeat) para que
+  // la rutina automatica de reparacion (cloud, sin sesion de login) pueda leer
+  // los tickets pendientes y marcarlos resueltos sin depender de isLoggedIn.
+  if (req.method === 'GET' && url.pathname === '/api/tickets/pendientes') {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const pendientes = ticketsTecnicos.filter((t) => t.estado !== 'resuelto');
+    json(res, 200, { tickets: pendientes });
+    return;
+  }
+
+  if (req.method === 'POST' && /^\/api\/tickets\/\d+\/resolver-auto$/.test(url.pathname)) {
+    if (!isHeartbeatAuthorized(req)) {
+      json(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+    const id = Number(url.pathname.match(/^\/api\/tickets\/(\d+)\/resolver-auto$/)[1]);
+    const ticket = ticketsTecnicos.find((t) => t.id === id);
+    if (!ticket) {
+      json(res, 404, { error: 'Ticket no encontrado' });
+      return;
+    }
+    try {
+      const body = await readBody(req);
+      const payload = body ? JSON.parse(body) : {};
+      ticket.estado = 'resuelto';
+      ticket.resueltoAt = Date.now();
+      if (payload.notaResolucion) ticket.notaResolucion = String(payload.notaResolucion).slice(0, 4000);
+      saveState();
+      json(res, 200, { ok: true, ticket });
+    } catch (err) {
+      json(res, 400, { error: 'Invalid JSON body: ' + String(err && err.message || err) });
     }
     return;
   }
