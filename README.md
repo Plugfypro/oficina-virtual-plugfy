@@ -1,4 +1,4 @@
-# Miniverse Office
+# oficina-virtual-plugfy
 
 Una oficina virtual para visualizar y coordinar tu equipo (humano, automatizado, o
 mixto) como si fuera un espacio de trabajo real: cada "trabajador" tiene un puesto,
