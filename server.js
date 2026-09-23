@@ -610,14 +610,28 @@ function truncate(value, max = 80) {
   return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
 }
 
+// Memoria real por trabajador: guarda las ultimas tareas distintas que
+// reporto, con su fecha -- no solo el dato mas reciente. Se recorta a 20
+// entradas por agente para no descontrolar el tamano de state.json. Solo se
+// anade una entrada nueva cuando la tarea cambia de verdad (evita llenar el
+// historial de heartbeats identicos consecutivos del mismo trabajo).
+const HISTORIAL_MAX_POR_AGENTE = 20;
+
 function heartbeat(payload) {
   const existing = agents.get(payload.agent) || {};
+  const estadoNuevo = VALID_AGENT_STATES.has(String(payload.state)) ? String(payload.state) : (existing.state || 'idle');
+  const tareaNueva = payload.task !== undefined ? sanitizeSpanishText(payload.task) : (existing.task || null);
+  const historialPrevio = Array.isArray(existing.historial) ? existing.historial : [];
+  const historial = tareaNueva && tareaNueva !== existing.task
+    ? [{ task: tareaNueva, state: estadoNuevo, timestamp: Date.now() }, ...historialPrevio].slice(0, HISTORIAL_MAX_POR_AGENTE)
+    : historialPrevio;
   const agent = {
     agent: payload.agent,
     id: payload.agent,
     name: sanitizeSpanishText(payload.name || existing.name || payload.agent),
-    state: VALID_AGENT_STATES.has(String(payload.state)) ? String(payload.state) : (existing.state || 'idle'),
-    task: payload.task !== undefined ? sanitizeSpanishText(payload.task) : (existing.task || null),
+    state: estadoNuevo,
+    task: tareaNueva,
+    historial,
     energy: payload.energy ?? existing.energy ?? 1,
     metadata: sanitizeDeep(payload.metadata || existing.metadata || {}),
     lastSeen: Date.now(),
